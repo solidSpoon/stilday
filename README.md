@@ -268,6 +268,7 @@ Stilday 有固定时间的采集（相册默认 22:00）和每日分析，所以
 ```sh
 go tool mygo dev      # 开发，热重载（保存即重建、重启）
 make dev-app          # 构建 dev 版并打开：dev 图标/identifier、inspector，不监听文件
+make release          # 发版：测试、构建 dmg、打 tag、推送、建 GitHub release
 go tool mygo build    # 打包成 .app / .dmg
 go test               # 不打开窗口，直接测试视图和协议
 go run ./tools/icon   # 重新生成 App 图标和菜单栏图标（都是矢量画的）
@@ -277,6 +278,12 @@ go run ./tools/icon   # 重新生成 App 图标和菜单栏图标（都是矢量
 `mygo.config.ts` 由 Node 22.6+ 或 Bun 求值；`STILDAY_DEV=1` 把它切成 dev 身份
 （名字、identifier、图标、`.mygo/dev`），`make dev-app` 用的就是这个。
 `mygo dev` 不用那个变量，它自己会加 ` Dev` 和 `.dev`。
+
+`make release` 的版本号取自 `mygo.config.ts` 的 `version`：发版前先把版本改好并提交，
+工作区要干净、当前在 `main`、`v<version>` 还没打过 tag。它会跑 `go test ./...`、
+`go tool mygo build` 出 dmg，打 tag、推 main 和 tag，再用
+`gh release create --generate-notes` 建 release（需要 `gh` 已登录）。没有
+Developer ID 时是 ad-hoc 签名，首次打开要右键 → 打开。
 
 
 ## 配置
