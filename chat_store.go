@@ -48,6 +48,9 @@ func (a *app) persistChat(m *chatMessage) {
 	if err != nil {
 		return
 	}
+	if err := os.MkdirAll(a.chat.dir, 0o755); err != nil {
+		return
+	}
 	f, err := os.OpenFile(filepath.Join(a.chat.dir, "chat.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return

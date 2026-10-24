@@ -243,7 +243,7 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 			if auto {
 				a.markAutoDay(today)
 			}
-			a.refreshChangedDays()
+			a.reloadCalendar()
 		}
 		publish()
 	}

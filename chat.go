@@ -103,11 +103,9 @@ func (a *app) openDay(day time.Time) {
 	if dir == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		a.chat.err = "创建工作目录：" + err.Error()
-		return
-	}
-	a.dataDays[key] = true
+	// Opening a day only looks at it: the work folder appears when
+	// something is written into it, so a visit leaves no empty folder
+	// behind (and the calendar has nothing to mark).
 	a.chat.messages = loadTranscript(dir)
 	for _, m := range a.chat.messages {
 		a.chat.nextID++

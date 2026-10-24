@@ -256,6 +256,9 @@ func TestAnalysisStartsFreshSession(t *testing.T) {
 	a.openDay(a.day)
 	a.addEntry(Entry{OccurredAt: a.now, Day: a.chat.day, Kind: "task", Summary: "旧事件"})
 	dir := a.cfg.workDayDir(a.day)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	transcript := filepath.Join(dir, "chat.jsonl")
 	if err := os.WriteFile(transcript, []byte(`{"role":"user","text":"旧对话"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -427,5 +430,31 @@ func TestSettingsLaunchGroup(t *testing.T) {
 		if !tt.HasText(s) {
 			t.Errorf("the settings page is missing %q", s)
 		}
+	}
+}
+
+// Opening a day only looks: no work folder, no calendar mark. The folder
+// appears when something is written into it.
+func TestOpeningADayLeavesNoFolder(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	empty := a.day.AddDate(0, 0, -3)
+	a.openDay(empty)
+	if _, err := os.Stat(a.cfg.workDayDir(empty)); !os.IsNotExist(err) {
+		t.Fatal("opening an empty day created its work folder")
+	}
+	if a.dataDays[dayKey(empty)] {
+		t.Fatal("opening an empty day marked it as having data")
+	}
+	// A message creates the folder, and only then.
+	a.addMessage(&chatMessage{Role: "user", Text: "记一笔"})
+	if _, err := os.Stat(filepath.Join(a.cfg.workDayDir(empty), "chat.jsonl")); err != nil {
+		t.Fatal("a saved message did not create the day's transcript:", err)
+	}
+	// An entry marks its day.
+	a.openDay(a.day)
+	a.addEntry(artifact.Entry{OccurredAt: time.Now(), Kind: "observation", Summary: "记一笔"})
+	if !a.dataDays[dayKey(a.day)] {
+		t.Fatal("a saved entry did not mark its day")
 	}
 }

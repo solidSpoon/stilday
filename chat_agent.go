@@ -27,6 +27,9 @@ func (a *app) startAgent() error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(a.chat.dir, 0o755); err != nil {
+		return err
+	}
 	sys := filepath.Join(a.chat.dir, "system.md")
 	if err := os.WriteFile(sys, []byte(a.systemPrompt()), 0o644); err != nil {
 		return err

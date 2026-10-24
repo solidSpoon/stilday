@@ -166,7 +166,7 @@ func (a *app) finishCollector(p collector, day time.Time, dir string, env collec
 		a.reloadMaterials(dir)
 	}
 	syncDayManifest(dir, day, a.collectorDay, a.collectorList)
-	a.refreshChangedDays()
+	a.reloadCalendar()
 
 	if len(a.collectQueue) > 0 {
 		next := a.collectorByID(a.collectQueue[0])
