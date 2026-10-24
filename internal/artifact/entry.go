@@ -10,7 +10,7 @@ import (
 
 // Entry is one line of a day's analysis:
 //
-//	{"occurred_at":"2026-10-23T14:05:00+08:00","updated_at":"2026-10-24T09:12:00+08:00","day":"2026-10-23","kind":"place","summary":"在 Blue Bottle 写了两个小时代码"}
+//	{"occurred_at":"2026-10-23T14:05:00+08:00","updated_at":"2026-10-24T09:12:00+08:00","day":"2026-10-23","kind":"activity","summary":"在 Blue Bottle 写了两个小时代码"}
 //
 // occurred_at is when the event happened; updated_at is when this line was
 // last written; day is the day it was analyzed into. The day is what a

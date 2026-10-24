@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo/plugins/loading"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 )
@@ -69,9 +70,8 @@ func (a *app) chatRow(c *ui.Context, row chatRow) {
 func (a *app) greetingPendingRow(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Gap(6).AlignItems(ui.End).Children(func() {
-		for _, sheet := range a.chat.sheets {
-			ui.Image(c, sheet).Width(280).Radius(12).Fit(ui.Contain).
-				Border(1, t.Border.Alpha(0.3)).Label("今日截图")
+		for i, sheet := range a.chat.sheets {
+			a.chatSheet(c, i, sheet)
 		}
 		ui.Row(c).Gap(4).AlignItems(ui.Center).Padding(11, 14).Radius(16).
 			Background(t.Background).Children(func() {
@@ -88,6 +88,26 @@ func (a *app) greetingPendingRow(c *ui.Context) {
 	})
 }
 
+// chatSheet is one contact sheet in the conversation: a click opens the
+// preview layer at that sheet, and the pointer lifts it a little.
+func (a *app) chatSheet(c *ui.Context, i int, b *ui.Bitmap) {
+	if b == nil {
+		return
+	}
+	t := c.Theme()
+	img := ui.Image(c, b).Width(280).Radius(12).Fit(ui.Contain).
+		Border(1, t.Border.Alpha(0.3)).Cursor(ui.CursorPointer).
+		Label("今日合集").Description(fmt.Sprintf("合集 %d", i+1))
+	pose := ui.Pose{}
+	if img.Hovered() {
+		pose = ui.Pose{Scale: 1.015}
+	}
+	img.AnimatePose(pose, ui.Snappy)
+	if img.Clicked() {
+		a.openPreview(a.sheetPreviews(), i, false)
+	}
+}
+
 func (a *app) chatMessage(c *ui.Context, m *chatMessage) {
 	t := c.Theme()
 	switch m.Role {
@@ -97,9 +117,8 @@ func (a *app) chatMessage(c *ui.Context, m *chatMessage) {
 		// day's contact sheet, so the resource pane no longer has to show it.
 		ui.Column(c).Gap(6).AlignItems(ui.End).Children(func() {
 			if m.Images > 0 {
-				for _, sheet := range a.chat.sheets {
-					ui.Image(c, sheet).Width(280).Radius(12).Fit(ui.Contain).
-						Border(1, t.Border.Alpha(0.3)).Label("今日截图")
+				for i, sheet := range a.chat.sheets {
+					a.chatSheet(c, i, sheet)
 				}
 			}
 			ui.Text(c, m.Text).Selectable().Padding(10, 14).Radius(16).
@@ -118,9 +137,11 @@ func (a *app) chatMessage(c *ui.Context, m *chatMessage) {
 					markdown.Stream(c, m.Text, &a.chat.md)
 				}
 			} else if !m.Done {
-				ui.Row(c).Gap(7).AlignItems(ui.Center).Children(func() {
-					ui.Spinner(c).Size(13, 13)
-					ui.Text(c, "思考中…").FontSize(12).TextColor(t.TextMuted)
+				// The reply has not started: three dots, as Messages
+				// draws a message being written.
+				ui.Row(c).Padding(10, 14).Radius(16).Background(t.Background).
+					AlignSelf(ui.Start).Label("思考中").Children(func() {
+					loading.BouncingDots(c, loading.Options{Size: 13, Color: t.TextMuted})
 				})
 			}
 		})
@@ -190,11 +211,8 @@ func toolLabel(m *chatMessage) string {
 		return "查看今日合集"
 	case "photo_detail":
 		return "查看照片细节"
-	case "stilday_emit":
-		if strings.HasPrefix(m.ToolDetail, "记录 ") {
-			return "写入 " + strings.TrimPrefix(m.ToolDetail, "记录 ")
-		}
-		return "写入 JSONL"
+	case "stilday_save_day":
+		return "保存当天日志"
 	default:
 		if m.Tool == "" {
 			return "工具"

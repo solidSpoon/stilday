@@ -42,8 +42,9 @@ type app struct {
 	boardDirty   bool
 	boardList    ui.ListState
 
-	chat chatState
-	pi   piState
+	chat   chatState
+	pi     piState
+	photos photoView
 
 	calendar        ui.ListState
 	months          []month
@@ -65,18 +66,17 @@ type app struct {
 	// Collectors: the registered plugins, the selected day's status, and
 	// the queue the nightly pipeline runs in order.
 	collectorList []collector
-	collectorCfg  collectorSettings
 	collectorDay  collectorDay
 	// Edits on the collector page are persisted on the next frame, never
 	// in the middle of the build that made them.
-	collectorAppDirty    bool
-	collectorCfgDirty    bool
-	collectorFlushQueued bool
-	collecting           bool
-	collectID            string
-	collectProgress      string
-	collectQueue         []string
-	autoAnalyzeDay       string
+	collectorAppDirty      bool
+	collectorSettingsDirty bool
+	collectorFlushQueued   bool
+	collecting             bool
+	collectID              string
+	collectProgress        string
+	collectQueue           []string
+	autoAnalyzeDay         string
 
 	// The background analysis: which day is running, what waits behind it,
 	// and what the user cancelled.
@@ -85,6 +85,13 @@ type app struct {
 	copiedUntil time.Time
 	fileErr     error
 	now         time.Time
+
+	// The menu bar icon, whether the app starts at login, and the flags
+	// that tell a quit from a window the user closed.
+	tray      *mygo.Tray
+	autoStart bool
+	quitting  bool
+	stopped   chan struct{}
 }
 
 // pageID names a destination in the sidebar.
@@ -111,18 +118,19 @@ func newApp() *app {
 		materialsShare:  defaultMaterialsShare,
 		sidebarWide:     true,
 		collectorList:   defaultCollectors(),
-		collectorCfg:    defaultCollectorSettings(),
 		collectorDay:    collectorDay{Items: map[string]collectorRun{}},
+		stopped:         make(chan struct{}),
 	}
 	a.cfg, a.cfgErr = loadConfig()
 	a.store = artifact.Open(a.cfg.artifactsRoot())
 	if a.cfg.configured() {
-		a.collectorCfg = loadCollectorSettings(a.cfg.storageRoot())
+		a.loadCollectorSettings()
 		go cleanupLegacyPhotoOriginals(a.cfg.workRoot())
 	}
 	a.chat = chatState{
 		byCall: map[string]*chatMessage{},
 	}
+	a.resetPhotos()
 	a.pi = piState{version: piVersion, path: installedPiBinary()}
 	a.pi.installed = a.pi.path != ""
 	a.chat.piPath, a.chat.piErr = resolvePi()
@@ -143,6 +151,11 @@ func (a *app) view(c *ui.Context) {
 	c.SetTheme(appleTheme(c.Theme()))
 	a.now = time.Now()
 	a.tick()
+	// The preview belongs to the day's page: leaving it puts the
+	// preview away, so that coming back does not reopen it.
+	if a.page != pageDay {
+		a.photos.open = false
+	}
 	if a.cfg.configured() {
 		if !a.hasMonth(a.now.Year(), a.now.Month()) {
 			a.reloadCalendar()

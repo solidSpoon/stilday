@@ -21,6 +21,7 @@ import (
 var photokitSource string
 
 type photokitAsset struct {
+	ID          string   `json:"id"`
 	File        string   `json:"file"`
 	Filename    string   `json:"filename"`
 	Time        float64  `json:"time"`

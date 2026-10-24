@@ -175,6 +175,8 @@ func (a *app) navRow(c *ui.Context, label, accessibility string, icon *ui.SVG, c
 	t := c.Theme()
 	row := ui.Row(c).Gap(10).AlignItems(ui.Center).Padding(6, 10).Radius(8).
 		Height(32).Cursor(ui.CursorPointer).Label(accessibility)
+	// The fill fades under the pointer, as a source list's row does.
+	row.Transition(ui.ElementTransition{Duration: 120 * time.Millisecond, Colors: true})
 	row.Children(func() {
 		color := t.TextMuted
 		if chosen {
@@ -207,12 +209,14 @@ func (a *app) analysisStatus(c *ui.Context) {
 		if n := len(a.analysis.Queue); n > 0 {
 			label = fmt.Sprintf("分析中 · 队列 %d", n)
 		}
-		ui.Text(c, label).FontSize(10.5).TextColor(t.TextMuted)
+		ui.Text(c, label).FontSize(10.5).TextColor(t.TextMuted).
+			ContentTransition(ui.ContentTransition{Numeric: true})
 	case a.analysis.Paused:
 		ui.Text(c, "已暂停").FontSize(10.5).TextColor(t.TextMuted)
 	default:
 		if n := len(a.analysis.Pending()); n > 0 {
-			ui.Textf(c, "%d 天待分析", n).FontSize(10.5).TextColor(t.TextMuted)
+			ui.Textf(c, "%d 天待分析", n).FontSize(10.5).TextColor(t.TextMuted).
+				ContentTransition(ui.ContentTransition{Numeric: true})
 		}
 	}
 }
@@ -233,6 +237,7 @@ func (a *app) settingsBar(c *ui.Context) {
 	t := c.Theme()
 	row := ui.Row(c).Gap(10).AlignItems(ui.Center).Padding(16, 16).Cursor(ui.CursorPointer).
 		Label("打开设置").BorderWidth(1, 0, 0, 0).BorderColor(hairline(t))
+	row.Transition(ui.ElementTransition{Duration: 120 * time.Millisecond, Colors: true})
 	row.Children(func() {
 		color := t.TextMuted
 		if a.page == pageSettings {
@@ -452,11 +457,14 @@ func (a *app) yearRow(c *ui.Context, year int) {
 		ui.Text(c, fmt.Sprintf("%d", year)).FontSize(12).Bold().TextColor(t.Text)
 		ui.Spacer(c)
 		if changed > 0 && count > 0 {
-			ui.Textf(c, "%d 天 · %d 待分析", count, changed).FontSize(11).TextColor(t.Accent)
+			ui.Textf(c, "%d 天 · %d 待分析", count, changed).FontSize(11).TextColor(t.Accent).
+				ContentTransition(ui.ContentTransition{Numeric: true})
 		} else if changed > 0 {
-			ui.Textf(c, "%d 待分析", changed).FontSize(11).TextColor(t.Accent)
+			ui.Textf(c, "%d 待分析", changed).FontSize(11).TextColor(t.Accent).
+				ContentTransition(ui.ContentTransition{Numeric: true})
 		} else if count > 0 {
-			ui.Textf(c, "%d 天", count).FontSize(11).TextColor(t.TextMuted)
+			ui.Textf(c, "%d 天", count).FontSize(11).TextColor(t.TextMuted).
+				ContentTransition(ui.ContentTransition{Numeric: true})
 		}
 	})
 }

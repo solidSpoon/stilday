@@ -27,7 +27,16 @@ func (f fakeCollector) Manifest() string {
 	return filepath.ToSlash(filepath.Join(f.folder, "manifest.json"))
 }
 func (f fakeCollector) View(c *ui.Context, view collectorView) {}
-func (f fakeCollector) FingerprintSeed() string                { return f.id + "-v1" }
+func (f fakeCollector) LoadSettings(root string) error         { return nil }
+func (f fakeCollector) SaveSettings() error                    { return nil }
+func (f fakeCollector) SettingsChanged() bool                  { return false }
+func (f fakeCollector) KeepsFolder() bool                      { return false }
+func (f fakeCollector) Schedule() *collectorSchedule {
+	return &collectorSchedule{Enabled: false}
+}
+func (f fakeCollector) Fingerprint(env collectorEnv) string {
+	return folderFingerprint{id: f.id, seed: func() string { return f.id + "-v1" }}.Fingerprint(env)
+}
 func (f fakeCollector) Run(env collectorEnv, progress func(string, int, int)) error {
 	if f.order != nil {
 		*f.order = append(*f.order, f.id)
@@ -314,15 +323,15 @@ func TestCollectorPageShowsGlobalUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if got := loadCollectorSettings(a.cfg.storageRoot()); got.Photos.Days != 30 {
-		t.Fatalf("the range did not save: %+v", got)
+	if got := a.photosPlugin().value.Days; got != 30 {
+		t.Fatalf("the range did not save: %d", got)
 	}
-	// The global settings round-trip to the storage root.
-	a.collectorCfg.Photos.Days = 30
-	a.saveCollectorCfg()
-	got := loadCollectorSettings(a.cfg.storageRoot())
-	if got.Photos.Days != 30 {
-		t.Fatalf("saved settings are %+v", got)
+	// It went to the plugin's own file, not to a shared one.
+	if _, err := os.Stat(filepath.Join(a.cfg.storageRoot(), "plugins", photosCollectorID, "settings.json")); err != nil {
+		t.Fatalf("the plugin settings file is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(a.cfg.storageRoot(), "collectors.json")); !os.IsNotExist(err) {
+		t.Errorf("the shared collectors.json is still written: %v", err)
 	}
 }
 
@@ -336,7 +345,7 @@ func TestPhotosRangeSync(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(a.chat.dir, "photos"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a.collectorCfg.Photos.Days = 2
+	a.photosPlugin().value.Days = 2
 	a.syncRecentPhotoDays(false)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) && a.collecting {
@@ -360,7 +369,7 @@ func TestCollectorFingerprintChangesWithRawFiles(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	a.openDay(a.day)
-	p := photosCollector{}
+	p := newPhotosCollector()
 	dir := a.chat.dir
 	raw := filepath.Join(dir, p.Folder())
 	if err := os.MkdirAll(raw, 0o755); err != nil {
@@ -369,22 +378,23 @@ func TestCollectorFingerprintChangesWithRawFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(raw, "001.jpg"), []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	first := fingerprintOf(dir, p)
-	again := fingerprintOf(dir, p)
+	env := collectorEnv{Day: a.day, Dir: dir, Folder: p.Folder()}
+	first := p.Fingerprint(env)
+	again := p.Fingerprint(env)
 	if first == "" || first != again {
 		t.Fatalf("fingerprint is not stable: %q %q", first, again)
 	}
 	if err := os.WriteFile(filepath.Join(raw, "001.jpg"), []byte("two"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	second := fingerprintOf(dir, p)
+	second := p.Fingerprint(env)
 	if first == second {
 		t.Fatal("fingerprint ignored a content change")
 	}
 	if err := os.WriteFile(filepath.Join(raw, "002.jpg"), []byte("three"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	third := fingerprintOf(dir, p)
+	third := p.Fingerprint(env)
 	if second == third {
 		t.Fatal("fingerprint ignored a new file")
 	}
@@ -535,5 +545,118 @@ func TestAnalysisStatusInSidebar(t *testing.T) {
 	tt.Frame()
 	if !tt.HasText("分析中 · 队列 1") {
 		t.Fatalf("the sidebar has no analysis status: %q", tt.Texts())
+	}
+}
+
+// The photo collector keeps what it has by default, and its settings file
+// keeps every field it was given.
+func TestPhotosKeepRemovedDefault(t *testing.T) {
+	p := newPhotosCollector()
+	if !p.value.KeepRemoved || p.value.Days != 1 {
+		t.Fatalf("a fresh plugin starts at %+v", p.value)
+	}
+	root := t.TempDir()
+	if err := p.LoadSettings(root); err != nil {
+		t.Fatal(err)
+	}
+	p.value.KeepRemoved = false
+	p.value.Days = 7
+	if !p.SettingsChanged() {
+		t.Fatal("an edit does not show as changed")
+	}
+	if err := p.SaveSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if p.SettingsChanged() {
+		t.Fatal("saving did not clear the change")
+	}
+	again := newPhotosCollector()
+	if err := again.LoadSettings(root); err != nil {
+		t.Fatal(err)
+	}
+	if again.value.KeepRemoved || again.value.Days != 7 {
+		t.Fatalf("the file reads %+v", again.value)
+	}
+	// A file written before a field existed starts it from the default.
+	path := filepath.Join(root, "plugins", photosCollectorID, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"days":3}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := newPhotosCollector()
+	if err := old.LoadSettings(root); err != nil {
+		t.Fatal(err)
+	}
+	if old.value.Days != 3 || !old.value.KeepRemoved {
+		t.Fatalf("an old file reads %+v", old.value)
+	}
+	if old.value.Schedule.Time != "22:00" {
+		t.Errorf("the schedule default was lost: %+v", old.value.Schedule)
+	}
+}
+
+// The switch in the photos card turns keeping removed photos off, and the
+// change is written without a save button.
+func TestCollectorKeepRemovedSwitch(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.openCollectorPage()
+	tt := ui.NewTester(a.view, 1300, 900)
+	tt.Frame()
+	if !a.photosPlugin().value.KeepRemoved {
+		t.Fatal("the switch starts off")
+	}
+	if err := tt.Click("保留相册里已删除的照片"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.photosPlugin().value.KeepRemoved {
+		t.Fatal("clicking the switch did not turn it off")
+	}
+	again := newPhotosCollector()
+	if err := again.LoadSettings(a.cfg.storageRoot()); err != nil {
+		t.Fatal(err)
+	}
+	if again.value.KeepRemoved {
+		t.Error("the setting was not saved")
+	}
+}
+
+// The old shared collectors.json is moved into the plugin's own folder
+// once, keeping what it said.
+func TestCollectorSettingsMigration(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	root := a.cfg.storageRoot()
+	legacy := `{
+  "photos": {"days": 30, "keep_removed": false},
+  "schedules": {"photos": {"enabled": true, "time": "21:30"}}
+}`
+	if err := os.WriteFile(filepath.Join(root, "collectors.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.collectorList = defaultCollectors()
+	a.loadCollectorSettings()
+
+	p := a.photosPlugin()
+	if p == nil {
+		t.Fatal("no photos plugin")
+	}
+	if p.value.Days != 30 || p.value.KeepRemoved || p.value.Schedule.Time != "21:30" {
+		t.Fatalf("the migration read %+v", p.value)
+	}
+	if p.SettingsChanged() {
+		t.Error("the migrated settings look unsaved")
+	}
+	if _, err := os.Stat(filepath.Join(root, "collectors.json")); !os.IsNotExist(err) {
+		t.Errorf("the shared file is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "collectors.json.migrated")); err != nil {
+		t.Errorf("the old file was not kept as .migrated: %v", err)
+	}
+	// A second load reads the plugin's file, and the migration is done.
+	a.collectorList = defaultCollectors()
+	a.loadCollectorSettings()
+	if again := a.photosPlugin(); again.value.Days != 30 {
+		t.Fatalf("the second load read %+v", again.value)
 	}
 }

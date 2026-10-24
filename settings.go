@@ -41,9 +41,28 @@ func (a *app) settingsPage(c *ui.Context) {
 					errorRow(c, "文件读写失败："+a.fileErr.Error())
 				}
 				a.storageSettings(c)
+				if a.cfg.configured() {
+					a.launchSettings(c)
+				}
 				a.modelSettings(c)
 				a.piSettings(c)
 				a.aiSettings(c)
+			})
+		})
+	})
+}
+
+// launchSettings is how the app starts, and what closing its window does.
+func (a *app) launchSettings(c *ui.Context) {
+	t := c.Theme()
+	group(c, func() {
+		groupTitle(c, "启动与后台")
+		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+			sw := ui.Switch(c, &a.autoStart).Label("开机自动启动")
+			sw.OnClick(func() { a.setOpenAtLogin(a.autoStart) })
+			ui.Column(c).Gap(3).Grow(1).MinWidth(0).Children(func() {
+				ui.Text(c, "登录时在后台启动，只在菜单栏留一个图标。").FontSize(11).TextColor(t.TextMuted)
+				ui.Text(c, "关掉窗口不会退出：到点照常采集和分析，点菜单栏或 Dock 图标回来。").FontSize(11).TextColor(t.TextMuted)
 			})
 		})
 	})
@@ -398,7 +417,7 @@ func (a *app) saveSettings() {
 	windowChanged := c.PhotoStart != a.cfg.PhotoStart || c.PhotoEnd != a.cfg.PhotoEnd
 	a.cfg = c
 	a.store = artifact.Open(a.cfg.artifactsRoot())
-	a.collectorCfg = loadCollectorSettings(a.cfg.storageRoot())
+	a.loadCollectorSettings()
 	a.page = pageBoard
 	a.boardDirty = true
 	a.settingsErr = ""

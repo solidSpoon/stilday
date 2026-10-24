@@ -31,18 +31,26 @@ func (a *app) finishCollection() {
 	a.chat.progress = ""
 }
 
+// photosPlugin is the photos collector, or nil when this build has none.
+func (a *app) photosPlugin() *photosCollector {
+	p, _ := a.collectorByID(photosCollectorID).(*photosCollector)
+	return p
+}
+
 // collectorEnv resolves the day's input for a run. The caller does this on
 // the UI thread, so the background run never reads the app's config.
-func (a *app) collectorEnv(day time.Time, dir string) (collectorEnv, error) {
-	return collectorEnvFor(a.cfg, day, dir)
+func (a *app) collectorEnv(p collector, day time.Time, dir string) (collectorEnv, error) {
+	return collectorEnvFor(a.cfg, p, day, dir)
 }
 
 // collectorEnvFor is collectorEnv with the config passed in, for a worker
 // that must not read the app.
-func collectorEnvFor(cfg config, day time.Time, dir string) (collectorEnv, error) {
+func collectorEnvFor(cfg config, p collector, day time.Time, dir string) (collectorEnv, error) {
 	env := collectorEnv{
-		Day: day,
-		Dir: dir,
+		Day:      day,
+		Dir:      dir,
+		Folder:   p.Folder(),
+		StateDir: pluginDir(cfg.storageRoot(), p.ID()),
 		Photos: photoInput{
 			Library:   photosLibrary(),
 			MaxPhotos: cfg.MaxPhotos,
@@ -87,7 +95,7 @@ func (a *app) startCollector(p collector, auto bool) {
 		return
 	}
 	day, dir := a.day, a.chat.dir
-	env, err := a.collectorEnv(day, dir)
+	env, err := a.collectorEnv(p, day, dir)
 	if err != nil {
 		a.chat.err = p.Name() + "：" + err.Error()
 		return
@@ -113,26 +121,29 @@ func (a *app) startCollector(p collector, auto bool) {
 		// No window (tests): run inline so the result is immediately
 		// observable and no worker mutates app state behind the caller.
 		err := a.execCollector(p, dir, env)
-		a.finishCollector(p, day, dir, err)
+		a.finishCollector(p, day, dir, env, err)
 		return
 	}
 	go func() {
 		err := a.execCollector(p, dir, env)
-		a.win.Update(func() { a.finishCollector(p, day, dir, err) })
+		a.win.Update(func() { a.finishCollector(p, day, dir, env, err) })
 	}()
 }
 
-// execCollector replaces the plugin's folder and runs it.
+// execCollector replaces the plugin's folder and runs it, unless the
+// plugin keeps what its folder already holds.
 func (a *app) execCollector(p collector, dir string, env collectorEnv) error {
 	folder := filepath.Join(dir, p.Folder())
-	_ = os.RemoveAll(folder)
+	if !p.KeepsFolder() {
+		_ = os.RemoveAll(folder)
+	}
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		return err
 	}
 	return p.Run(env, a.collectorProgress(p.ID(), ""))
 }
 
-func (a *app) finishCollector(p collector, day time.Time, dir string, err error) {
+func (a *app) finishCollector(p collector, day time.Time, dir string, env collectorEnv, err error) {
 	a.finishCollection()
 	if a.collectorDay.Items == nil {
 		a.collectorDay.Items = map[string]collectorRun{}
@@ -147,7 +158,7 @@ func (a *app) finishCollector(p collector, day time.Time, dir string, err error)
 		run.Status = "done"
 		run.Error = ""
 		a.chat.err = ""
-		run.recordFingerprint(fingerprintOf(dir, p))
+		run.recordFingerprint(p.Fingerprint(env))
 	}
 	a.collectorDay.Items[p.ID()] = run
 	a.saveDayState(dir, a.collectorDay)
@@ -191,23 +202,6 @@ func (a *app) startCollectorID(id string) {
 	a.startCollector(p, false)
 }
 
-// collectorSchedule returns a plugin's daily schedule, creating the
-// default when the stored config predates per-plugin schedules.
-func (a *app) collectorSchedule(id string) *collectorSchedule {
-	if a.collectorCfg.Schedules == nil {
-		a.collectorCfg.Schedules = map[string]*collectorSchedule{}
-	}
-	s, ok := a.collectorCfg.Schedules[id]
-	if !ok || s == nil {
-		s = &collectorSchedule{Enabled: true, Time: a.collectTimeLabel()}
-		a.collectorCfg.Schedules[id] = s
-	}
-	if strings.TrimSpace(s.Time) == "" {
-		s.Time = a.collectTimeLabel()
-	}
-	return s
-}
-
 // maybeAutoCollect starts each enabled plugin at its own daily time. A
 // plugin that already started today at or after its time is left alone.
 // While a conversation or the analysis queue owns the app, the collector
@@ -219,8 +213,8 @@ func (a *app) maybeAutoCollect() {
 	now := a.clockNow()
 	today := midnight(now)
 	for _, p := range a.collectorList {
-		s := a.collectorSchedule(p.ID())
-		if !s.Enabled {
+		s := p.Schedule()
+		if s == nil || !s.Enabled {
 			continue
 		}
 		at, err := clockOn(today, s.Time)
@@ -359,7 +353,9 @@ func (a *app) markCollector(id, status, errText string) {
 	run.Error = errText
 	if status == "done" {
 		if p := a.collectorByID(id); p != nil {
-			run.recordFingerprint(fingerprintOf(a.chat.dir, p))
+			if env, err := a.collectorEnv(p, a.day, a.chat.dir); err == nil {
+				run.recordFingerprint(p.Fingerprint(env))
+			}
 		}
 	}
 	a.collectorDay.Items[id] = run
@@ -424,8 +420,8 @@ func (a *app) flushCollectorPage() {
 		a.collectorAppDirty = false
 		a.saveCollectorPageConfig()
 	}
-	if a.collectorCfgDirty {
-		a.collectorCfgDirty = false
+	if a.collectorSettingsDirty {
+		a.collectorSettingsDirty = false
 		a.saveCollectorCfg()
 	}
 }

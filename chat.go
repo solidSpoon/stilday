@@ -138,6 +138,7 @@ func (a *app) openDay(day time.Time) {
 func (a *app) resetForDay() {
 	a.closeAgent()
 	a.chat.reset()
+	a.resetPhotos()
 }
 
 // reset returns the conversation to its pre-open state. The day's folder,
@@ -260,16 +261,17 @@ func (a *app) prepareDay(force bool) {
 	}()
 }
 
+// decodeSheets loads the contact sheets, keeping one slot per manifest
+// sheet so a picture still knows which sheet it is.
 func (a *app) decodeSheets(m *manifest) []*ui.Bitmap {
-	out := make([]*ui.Bitmap, 0, len(m.Sheets))
-	for _, s := range m.Sheets {
+	out := make([]*ui.Bitmap, len(m.Sheets))
+	for i, s := range m.Sheets {
 		data, err := os.ReadFile(filepath.Join(a.chat.dir, s.File))
 		if err != nil {
 			continue
 		}
-		b, err := ui.DecodeBitmap(data)
-		if err == nil {
-			out = append(out, b)
+		if b, err := ui.DecodeBitmap(data); err == nil {
+			out[i] = b
 		}
 	}
 	return out
@@ -345,16 +347,14 @@ func (a *app) chatHeader(c *ui.Context) {
 	})
 }
 
-// promptForDrawer returns the stored system prompt, or the current one for
-// an older conversation that predates the system message.
-
-// promptForDrawer returns the stored system prompt, or the current one for
-// an older conversation that predates the system message.
+// promptForDrawer returns the stored system prompt, or the current one when
+// the conversation predates the prompt the app ships now.
 func (a *app) promptForDrawer() string {
 	text := a.latestSystemPrompt()
-	// Older conversations stored the previous English base prompt; show the
-	// current Chinese one rather than that stale copy.
-	if text == "" || strings.HasPrefix(strings.TrimSpace(text), "You are Stilday's day assistant.") {
+	// The stored prompt is the base it was generated from, then that day's
+	// context. A different base means the conversation predates a prompt
+	// change: show the current one rather than the stale copy.
+	if text == "" || !strings.HasPrefix(text, strings.TrimSpace(promptBase())) {
 		return a.systemPrompt()
 	}
 	return text

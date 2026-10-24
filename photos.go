@@ -36,6 +36,15 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 		progress = func(string, int, int) {}
 	}
 
+	// A day that keeps what it has starts from its manifest: the photos
+	// the library no longer has stay, and only new ones are added.
+	var kept *manifest
+	if o.KeepRemoved {
+		if old, err := loadManifest(dayDir); err == nil && old.Day == dayKey(o.Day) {
+			kept = old
+		}
+	}
+
 	progress("正在查找照片", 0, 0)
 	library := strings.HasSuffix(strings.ToLower(filepath.Base(expandPath(o.Source))), ".photoslibrary")
 	photoSource := "originals"
@@ -111,6 +120,9 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 			if photoNote == "" {
 				photoNote = "PhotoKit 没有返回照片；没有扫描图库 originals"
 			}
+			if kept != nil && len(kept.Photos) > 0 {
+				return kept, nil
+			}
 			return writeEmpty()
 		}
 		var err error
@@ -162,13 +174,14 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 	// A day can hold thousands of photos. The sheets show an even sample
 	// across the day, so every part of it is represented; the detail tool
 	// reads whichever sampled photo the model asks for.
-	if len(selected) > o.MaxPhotos {
-		sampled := make([]candidate, 0, o.MaxPhotos)
+	sampled := len(selected) > o.MaxPhotos
+	if sampled {
+		even := make([]candidate, 0, o.MaxPhotos)
 		step := float64(len(selected)) / float64(o.MaxPhotos)
 		for i := 0; i < o.MaxPhotos; i++ {
-			sampled = append(sampled, selected[int(float64(i)*step)])
+			even = append(even, selected[int(float64(i)*step)])
 		}
-		selected = sampled
+		selected = even
 	}
 
 	m := &manifest{
@@ -181,15 +194,30 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 		PhotoSource: photoSource,
 		PhotoNote:   photoNote,
 	}
-	// A re-run replaces the day's generated files. The old photos/ folder
-	// (original copies) is removed too; it is not part of the new layout.
-	for _, d := range []string{"photos", "previews", "thumbs", "sheets"} {
+	// A re-run replaces the day's generated files, unless the day keeps
+	// what it has: then the previews stay, and only the sheets are drawn
+	// again. The old photos/ folder (original copies) is not part of the
+	// layout either way.
+	drop := []string{"photos", "sheets"}
+	if o.KeepRemoved && kept != nil {
+		m.Photos = append(m.Photos, kept.Photos...)
+	} else if !o.KeepRemoved {
+		drop = append(drop, "previews", "thumbs")
+	}
+	for _, d := range drop {
 		_ = os.RemoveAll(filepath.Join(dayDir, d))
 	}
 	for _, d := range []string{"previews", "thumbs", "sheets"} {
 		if err := os.MkdirAll(filepath.Join(dayDir, d), 0o755); err != nil {
 			return nil, err
 		}
+	}
+	// New photos are written under temporary numbers, after the ones the
+	// day already has, and take their place in the order once the day is
+	// complete (see renumberPhotos).
+	next := 1
+	for _, p := range m.Photos {
+		next = max(next, p.Index+1)
 	}
 
 	// Original pixel sizes come from the same Spotlight metadata as the
@@ -209,18 +237,40 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 	// shows. No original copy is kept: the source can be HEIC or protected,
 	// and these two JPEGs are all the model and the UI need.
 	progress("正在生成预览", 0, len(selected))
+	keptCount, matched := len(m.Photos), 0
 	for i, c := range selected {
+		var id string
+		if c.pk != nil {
+			id = c.pk.ID
+		}
+		if keptCount > 0 {
+			if k := findPhoto(m.Photos[:keptCount], c.at, id, c.w, c.h); k >= 0 {
+				// A photo collected before the identifier was stored gets
+				// it now, so the next run recognises it exactly.
+				if id != "" && m.Photos[k].SourceID == "" {
+					m.Photos[k].SourceID = id
+				}
+				matched++
+				continue
+			}
+		}
+		// The number is the file's name: a photo that cannot be rendered
+		// takes no number, so the labels, the manifest and the two
+		// folders never drift apart.
+		idx := next
 		ext := strings.ToLower(filepath.Ext(c.path))
 		if ext == "" {
 			ext = ".jpg"
 		}
-		preview := filepath.ToSlash(filepath.Join("previews", fmt.Sprintf("%03d.jpg", i+1)))
+		preview := previewName(idx)
 		if err := makePreview(c.path, filepath.Join(dayDir, preview), 1600); err != nil {
+			_ = os.Remove(filepath.Join(dayDir, preview))
 			continue
 		}
-		thumb := filepath.ToSlash(filepath.Join("thumbs", fmt.Sprintf("%03d.jpg", i+1)))
+		thumb := thumbName(idx)
 		if err := makePreview(filepath.Join(dayDir, preview), filepath.Join(dayDir, thumb), 360); err != nil {
 			_ = os.Remove(filepath.Join(dayDir, preview))
+			_ = os.Remove(filepath.Join(dayDir, thumb))
 			continue
 		}
 		w, h := imageSize(filepath.Join(dayDir, preview))
@@ -236,7 +286,8 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 			size = fi.Size()
 		}
 		m.Photos = append(m.Photos, photo{
-			Index:      i + 1,
+			Index:      idx,
+			SourceID:   id,
 			Preview:    preview,
 			Thumb:      thumb,
 			Read:       preview,
@@ -247,14 +298,24 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 			Format:     format,
 			Meta:       photoMetadata(c.path, c.pk),
 		})
+		next++
 		if i%5 == 0 {
 			progress("正在生成预览", i+1, len(selected))
 		}
 	}
-	// Skipped photos leave gaps in the numbering; renumber to keep the
-	// sheet labels contiguous.
-	for i := range m.Photos {
-		m.Photos[i].Index = i + 1
+	// The day in capture order, its files named after their place. A photo
+	// added later pushes the others along, so the label on the sheet, the
+	// manifest's index and the file name are always one number.
+	if err := renumberPhotos(dayDir, m.Photos); err != nil {
+		return nil, err
+	}
+	if gone := keptCount - matched; o.KeepRemoved && gone > 0 && !sampled {
+		note := fmt.Sprintf("有 %d 张照片已不在相册里，按设置保留。", gone)
+		if strings.TrimSpace(m.PhotoNote) != "" {
+			m.PhotoNote += "；" + note
+		} else {
+			m.PhotoNote = note
+		}
 	}
 
 	progress("正在拼接合集", 0, 0)
@@ -305,6 +366,87 @@ func preparePhotos(dayDir string, o photoOptions, progress func(stage string, do
 	}
 	progress("完成", len(m.Photos), len(m.Photos))
 	return m, nil
+}
+
+// findPhoto is the index of the photo the day already collected, or -1.
+// The PhotoKit asset's identifier makes it exact; without one, the capture
+// second and the original size tell two photos apart, as well as they can.
+func findPhoto(photos []photo, at time.Time, id string, w, h int) int {
+	for i, p := range photos {
+		if id != "" && p.SourceID != "" {
+			if p.SourceID == id {
+				return i
+			}
+			continue
+		}
+		if p.CapturedAt != at.Format(time.RFC3339) {
+			continue
+		}
+		if p.Width > 0 && w > 0 && (p.Width != w || p.Height != h) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// previewName and thumbName are the files of the photo in a place of the
+// day, counting from 1.
+func previewName(i int) string {
+	return filepath.ToSlash(filepath.Join("previews", fmt.Sprintf("%03d.jpg", i)))
+}
+
+func thumbName(i int) string {
+	return filepath.ToSlash(filepath.Join("thumbs", fmt.Sprintf("%03d.jpg", i)))
+}
+
+// photoTime is a photo's capture time, zero when it has none.
+func photoTime(p photo) time.Time {
+	at, _ := time.Parse(time.RFC3339, p.CapturedAt)
+	return at
+}
+
+// renumberPhotos puts the day in capture order and renames the pictures to
+// the numbers of their places. Nothing is renamed when a photo keeps its
+// place, so a day that gains nothing is not touched.
+func renumberPhotos(dayDir string, photos []photo) error {
+	sort.SliceStable(photos, func(i, j int) bool {
+		return photoTime(photos[i]).Before(photoTime(photos[j]))
+	})
+	type move struct{ from, to string }
+	var moves []move
+	for i := range photos {
+		p := &photos[i]
+		preview, thumb := previewName(i+1), thumbName(i+1)
+		if p.Index == i+1 && p.Preview == preview && p.Thumb == thumb {
+			p.Read = preview
+			continue
+		}
+		moves = append(moves,
+			move{from: p.Preview, to: preview},
+			move{from: p.Thumb, to: thumb},
+		)
+		p.Index = i + 1
+		p.Preview, p.Read, p.Thumb = preview, preview, thumb
+	}
+	if len(moves) == 0 {
+		return nil
+	}
+	// Every moving file leaves its old name for a temporary one first:
+	// 005.jpg may be going to 001.jpg while 001.jpg is going to 006.jpg.
+	temps := make([]string, len(moves))
+	for i, m := range moves {
+		temps[i] = filepath.ToSlash(filepath.Join(filepath.Dir(m.from), ".renumber-"+filepath.Base(m.from)))
+		if err := os.Rename(filepath.Join(dayDir, m.from), filepath.Join(dayDir, temps[i])); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	for i, m := range moves {
+		if err := os.Rename(filepath.Join(dayDir, temps[i]), filepath.Join(dayDir, m.to)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // makePreview writes a JPEG no larger than limit. sips reads HEIC and

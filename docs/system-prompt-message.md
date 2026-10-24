@@ -47,7 +47,7 @@ if card.Clicked() {
 ## 1b. 用户消息与当天截图
 
 分析触发仍然是一条普通用户消息，但文字不是技术指令。技术任务（看合集、
-概述、`stilday_emit`）已经移到 `prompts/system-prompt.md` 的
+概述、`stilday_save_day`）已经移到 `prompts/system-prompt.md` 的
 「The daily analysis」。
 
 第一句话由 `greeting.go` 的一次性 Pi 生成：在临时目录单独启动一个
@@ -77,7 +77,7 @@ var systemPromptBase string
 `chat_prompt.go` 的 `systemPrompt()` 在静态部分后面追加动态内容：
 
 ```go
-b.WriteString(strings.TrimSpace(systemPromptBase))
+b.WriteString(strings.TrimSpace(promptBase()))
 b.WriteString("\n\n")
 fmt.Fprintf(&b, "今天是 %s。\n", a.chat.day)
 fmt.Fprintf(&b, "当天的文件夹是 %s。\n\n", a.chat.dir)
@@ -91,6 +91,26 @@ fmt.Fprintf(&b, "当天的文件夹是 %s。\n\n", a.chat.dir)
 - 特殊消息会自动显示完整结果；长提示语默认折叠，点「查看」展开。
 - 动态的今天、目录、采集器、照片数仍在代码里追加，不需要写进文件。
 
+### `stilday_save_day` 的入参是生成的
+
+「记录」一节里的入参类型定义不是手写的。`prompts/system-prompt.md` 里只有一行
+占位符：
+
+```
+{{stilday_save_day_args}}
+```
+
+`promptBase()`（`prompt.go`）和 `systemPrompt()` 在运行时用 `day_log_schema.go` 的
+`dayLogArgs` 把它替换成 TypeScript 类型定义（含注释）。同一棵树还会序列化成
+JSON Schema，经 `STILDAY_DAY_LOG_SCHEMA` 传给扩展，`pi/stilday.ts` 用它建
+TypeBox 参数。所以提示语描述的形状就是工具实际接受的形状，两边不会不一致。
+
+- 加字段、改说明、改可选性：只改 `day_log_schema.go` 的 `dayLogArgs`。
+- 固定取值用 `enumNode`：提示语里渲染成联合类型，扩展的 schema 里是 enum。
+- 类型定义里的注释就是字段的 `description`，会同时出现在提示语和工具 schema 里。
+- 新增一节不需要生成的正文（比如典型场景举例），直接写在
+  `prompts/system-prompt.md` 里。
+
 ## 3. Agent 的工具
 
 Stilday 的 Agent 是 Pi。Pi 自己的设置（见 Pi 的 `docs/settings.md`）里：
@@ -103,7 +123,7 @@ Stilday 的 Agent 是 Pi。Pi 自己的设置（见 Pi 的 `docs/settings.md`）
 Stilday 在 `chat_agent.go` 的 `startAgent` 里传了一个**纯名称列表**：
 
 ```go
-Tools: []string{"day_overview", "read", "stilday_emit"},
+Tools: []string{"day_overview", "read", "stilday_save_day"},
 ```
 
 纯名称列表会**替换** Pi 的 `defaultTools`，所以当前这个 Agent 实际只有三个工具：
@@ -112,11 +132,11 @@ Tools: []string{"day_overview", "read", "stilday_emit"},
 | --- | --- | --- |
 | `day_overview` | Stilday 自定义（`pi/stilday.ts`） | 取当天的编号合集和照片列表；需要再看照片时调用 |
 | `read` | Pi 内置 | 读 `manifest.json`，再按照片的 `read` 路径读 1600px JPEG 预览 |
-| `stilday_emit` | Stilday 自定义（`pi/stilday.ts`） | 把要保留的事件写回；应用侧映射成年度 JSONL 的 `occurred_at` / `updated_at` / `day` / `kind` / `summary` |
+| `stilday_save_day` | Stilday 自定义（`pi/stilday.ts`） | 保存当天的日志；每次调用用新列表替换当天已有的记录；应用侧映射成年度 JSONL 的 `occurred_at` / `updated_at` / `day` / `kind` / `summary` |
 
 当前**没有**启用：`bash`、`edit`、`write`、`grep`、`find`、`ls`、
 `powershell`、`codemode`、`tool_search`。也就是说，模型不能执行 shell、改文件，
-只能看当天素材、读照片，并通过 `stilday_emit` 写事件。
+只能看当天素材、读照片，并通过 `stilday_save_day` 写当天的日志。
 
 `chat_message.go` 里还有 `photo_detail` 的旧显示映射，但扩展没有注册这个工具；
 照片细节实际走 `read`，读 `manifest.json` 里给出的 `read` 路径。
@@ -130,6 +150,7 @@ Tools: []string{"day_overview", "read", "stilday_emit"},
 - `chat.go` — `chatHeader` / `systemPromptModal`（头像 + 玻璃按钮 + 弹层）。
 - `chat_prompt.go` — `systemPrompt` 拼接静态 + 动态。
 - `chat_store.go` — `persistChat` / `loadTranscript` 持久化。
-- `prompt.go` — 嵌入 `prompts/system-prompt.md`。
-- `pi/stilday.ts` — `day_overview`、`stilday_emit` 两个自定义工具。
+- `prompt.go` — 嵌入 `prompts/system-prompt.md`，填 `stilday_save_day` 那一节。
+- `day_log_schema.go` — `stilday_save_day` 入参的唯一声明：生成提示语的类型定义和扩展的 schema。
+- `pi/stilday.ts` — `day_overview`、`stilday_save_day` 两个自定义工具。
 - `chat_agent.go` — `startAgent` 传 `Tools` 白名单给 Pi。

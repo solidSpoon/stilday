@@ -43,13 +43,16 @@ stilday/
 ## 规则
 
 1. **采集器是插件，不是 app 的一部分。** 它只收到 `collectorEnv`（当天目录、
-   照片来源、时段）和 `collectorView`（可编辑的全局设置、当天 manifest）。
-   新增采集器时不要往接口里塞 `*app`；它需要的新输入放进 env。
+   插件自己的目录、照片来源、时段）和 `collectorView`（当天 manifest）。设置
+   由插件自己持有：`LoadSettings` / `SaveSettings` / `SettingsChanged` 读写
+   `<存储>/plugins/<id>/settings.json`，指纹也由插件的 `Fingerprint` 给（默认
+   实现是文件夹哈希）。新增采集器时不要往接口里塞 `*app`；它需要的新输入放进
+   env。
 2. **后台线程只做文件和 CPU。** 回写状态一律 `a.win.Update(...)`；窗口不存在
    （测试）时同步内联执行，测试因此是确定性的。不要在工作线程里读 `a.cfg`、
    `a.chat`——在 UI 线程算好 `collectorEnv`、`piTarget` 再传进去。
 3. **渲染期间不写文件。** 采集器页的输入直接绑定到持久字段，构建结束时只标记
-   `collectorAppDirty` / `collectorCfgDirty`，再由 `scheduleCollectorFlush`
+   `collectorAppDirty` / `collectorSettingsDirty`，再由 `scheduleCollectorFlush`
    排到本帧之后；下一帧开头的 `a.tick()` 也会兜底 `flushCollectorPage()`。
    设置页仍是显式保存。
 4. **一天的会话只有一个重置入口。** 换天走 `resetForDay` → `chatState.reset`；
@@ -75,13 +78,13 @@ stilday/
 ## 数据流
 
 ```
-采集器 Run ──► work/YYYY/MM/DD/<folder> ──► SHA256 指纹
+采集器 Run ──► work/YYYY/MM/DD/<folder> ──► 插件自己的 Fingerprint
                                               │
 抓到的天 ──► collectors.json（fingerprint / analyzed_fingerprint）
                                               │
                      changedDays ──► analysisQueue ──► 选中那天
                                                       │
-                          Pi (RPC) ──► stilday_emit ──► store.append
+                          Pi (RPC) ──► stilday_save_day ──► store.save
                                                       │
                                     artifacts/YYYY.jsonl ──► 日历标记 / 事件板
 ```
@@ -92,8 +95,10 @@ stilday/
   `dayPage` 的受保护 `openDay` 从磁盘载入 transcript、collector 状态和 manifest。
 - **重新分析**：清空当天产物行、`chat.jsonl`、`.pi/`，保留照片与 manifest；
   `chatState` 换新会话后重新生成开场白并发送。
-- **采集一次**：`beginCollection` → 清空插件文件夹 → `Run` → 指纹 →
-  `finishCollection`；状态落在当天 `collectors.json`，并同步进 `manifest.json`。
+- **采集一次**：`beginCollection` → 清空插件文件夹（插件说 `KeepsFolder` 就
+  不清）→ `Run` → 插件自己的 `Fingerprint` → `finishCollection`；状态落在当天
+  `collectors.json`，并同步进 `manifest.json`。插件设置由插件自己从
+  `<存储>/plugins/<id>/settings.json` 读、自己写回。
 - **夜间链路**：每个启用插件到点采集（`maybeAutoCollect`）；到每日分析时间，
   只把「启用插件都已 done 且指纹有变化」的天排队（`maybeAutoAnalyze`）。
 

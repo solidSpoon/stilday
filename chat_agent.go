@@ -31,7 +31,10 @@ func (a *app) startAgent() error {
 	if err := os.WriteFile(sys, []byte(a.systemPrompt()), 0o644); err != nil {
 		return err
 	}
-	env := append(append([]string{}, target.env...), "STILDAY_DAY_DIR="+a.chat.dir)
+	env := append(append([]string{}, target.env...),
+		"STILDAY_DAY_DIR="+a.chat.dir,
+		"STILDAY_DAY_LOG_SCHEMA="+dayLogSchemaJSON(),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	c, err := agent.Start(ctx, agent.Options{
 		Bin:          target.bin,
@@ -43,7 +46,7 @@ func (a *app) startAgent() error {
 		SystemPrompt: sys,
 		Provider:     target.spec.ID,
 		Model:        target.model,
-		Tools:        []string{"day_overview", "read", "stilday_emit"},
+		Tools:        []string{"day_overview", "read", "stilday_save_day"},
 	})
 	if err != nil {
 		cancel()
@@ -142,9 +145,9 @@ func (a *app) handleAgentEvent(ev agent.Event) {
 			m.ToolStatus = "failed"
 		}
 		m.ToolDetail = toolDetail(ev)
-		if ev.ToolName == "stilday_emit" && !ev.IsError {
-			if n := a.emitEntries(ev.Result.Details); n > 0 {
-				m.ToolDetail = fmt.Sprintf("记录 %d 条", n)
+		if ev.ToolName == "stilday_save_day" && !ev.IsError {
+			if n := a.saveDayEntries(ev.Result.Details); n > 0 {
+				m.ToolDetail = fmt.Sprintf("保存 %d 条", n)
 			}
 		}
 		a.persistChat(m)

@@ -3,7 +3,7 @@
 > 状态：已实现，本文保留为当时的调研。当前实现分散在 `chat_agent.go`、
 > `chat_prompt.go`、`agent/rpc.go`、`pi/stilday.ts`，分层见
 > `docs/architecture.md`。三个工具是 `day_overview`、`read`、
-> `stilday_emit`；本文后半的 `stilday_result`、按天
+> `stilday_save_day`；本文后半的 `stilday_result`、按天
 > `artifacts/YYYY/MM/DD.jsonl` 等是最初方案，保留作为参考。
 
 ## 结论
@@ -253,7 +253,7 @@ Pi 的价值在于 **执行**：它能读 `~/.stilday`、grep 当天事件、调
 - [x] `agent` 包 + RPC 客户端 + 假 `pi` 的协议测试
 - [x] 对话页：流式回复、工具调用、每天一个 Pi 会话
 - [x] 照片工作目录、编号合集、`day_overview` / `read` 看细节
-- [x] `stilday_emit` 写回当天 JSONL
+- [x] `stilday_save_day` 写回当天 JSONL
 - [ ] 用 PhotoKit 直接取照片（现在是文件夹或 Photos 的 `originals`）
 - [ ] 更多内置任务、每周回顾
 

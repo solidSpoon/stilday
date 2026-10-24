@@ -4,6 +4,7 @@ import CoreGraphics
 import ImageIO
 
 struct OutAsset: Codable {
+    let id: String
     let file: String
     let filename: String
     let time: Double
@@ -111,6 +112,7 @@ struct StildayPhotos {
             let sub = asset.mediaSubtypes
             let coord = asset.location?.coordinate
             out.append(OutAsset(
+                id: asset.localIdentifier,
                 file: file,
                 filename: resource?.originalFilename ?? file,
                 time: asset.creationDate?.timeIntervalSince1970 ?? 0,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,7 @@ func configureTestApp(t *testing.T, a *app) string {
 	a.day = midnight(time.Now())
 	a.chat.piPath = "/usr/local/bin/pi"
 	a.chat.piErr = ""
+	a.loadCollectorSettings()
 	a.resetForDay()
 	a.loadEntries()
 	a.reloadCalendar()
@@ -281,4 +283,149 @@ func TestAnalysisStartsFreshSession(t *testing.T) {
 // containsFold reports whether s contains sub, ignoring case.
 func containsFold(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// A click chooses a photo in the materials panel, the arrows move the
+// choice, and space opens and closes the preview over the window, where
+// the arrows keep switching.
+func TestPhotoPreview(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.page = "day"
+
+	src := t.TempDir()
+	for i := 0; i < 3; i++ {
+		makePhoto(t, filepath.Join(src, "p"+string(rune('a'+i))+".jpg"), color.RGBA{uint8(80 + 40*i), 140, 200, 255})
+	}
+	start, end, err := a.cfg.photoWindow(a.day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := a.cfg.workDayDir(a.day)
+	m, err := preparePhotos(dir, photoOptions{
+		Source: src, Day: a.day, Start: start, End: end, MaxPhotos: 50, SheetSize: 30,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Photos) != 3 {
+		t.Fatalf("%d photos prepared", len(m.Photos))
+	}
+	a.chat.loaded = true
+	a.chat.day = a.day.Format("2006-01-02")
+	a.chat.dir = dir
+	a.chat.manifest = m
+	a.chat.sheets = a.decodeSheets(m)
+	a.chat.thumbs = a.decodeThumbs(m)
+	a.chat.piPath = "/usr/local/bin/pi"
+
+	tt := ui.NewTester(a.view, 1400, 900)
+	tt.Frame()
+	if err := tt.Click("大图 1"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.photos.sel != 0 {
+		t.Fatalf("click chose %d", a.photos.sel)
+	}
+
+	tt.Key(0, ui.KeyRight)
+	tt.Frame()
+	if a.photos.sel != 1 {
+		t.Fatalf("the right arrow chose %d", a.photos.sel)
+	}
+	// Two columns: down from the second goes to the last photo, up from
+	// it to the first.
+	tt.Key(0, ui.KeyDown)
+	tt.Frame()
+	if a.photos.sel != 2 {
+		t.Fatalf("the down arrow chose %d", a.photos.sel)
+	}
+	tt.Key(0, ui.KeyUp)
+	tt.Frame()
+	if a.photos.sel != 0 {
+		t.Fatalf("the up arrow chose %d", a.photos.sel)
+	}
+
+	// Preview the second photo, and switch it inside the layer.
+	tt.Key(0, ui.KeyRight)
+	tt.Frame()
+	tt.Key(0, ui.KeySpace)
+	tt.Frame()
+	if !a.photos.open {
+		t.Fatal("space did not open the preview")
+	}
+	if a.photos.cache[filepath.Join(dir, m.Photos[a.photos.sel].Preview)] == nil {
+		t.Errorf("the preview was not decoded: %q", tt.Texts())
+	}
+	tt.Key(0, ui.KeyLeft)
+	tt.Frame()
+	if a.photos.sel != 0 {
+		t.Fatalf("the preview's left arrow chose %d", a.photos.sel)
+	}
+	tt.Key(0, ui.KeyRight)
+	tt.Frame()
+	if a.photos.sel != 1 {
+		t.Fatalf("the preview's right arrow chose %d", a.photos.sel)
+	}
+	tt.Key(0, ui.KeySpace)
+	tt.Frame()
+	if a.photos.open {
+		t.Fatal("space did not close the preview")
+	}
+	if !tt.HasText("大图") {
+		t.Errorf("the materials panel is gone: %q", tt.Texts())
+	}
+
+	// Escape closes it too, as a dialog does.
+	tt.Key(0, ui.KeySpace)
+	tt.Frame()
+	if !a.photos.open {
+		t.Fatal("space did not reopen the preview")
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+	if a.photos.open {
+		t.Fatal("escape did not close the preview")
+	}
+
+	// The contact sheet a message carries previews too, and it does not
+	// move the grid's choice.
+	a.chat.messages = []*chatMessage{{ID: 1, Role: "user", Text: "先看今天的照片", Done: true, Images: 1}}
+	a.chat.nextID = 1
+	tt.Frame()
+	if err := tt.Click("今日合集"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if !a.photos.open {
+		t.Fatal("clicking the sheet did not open the preview")
+	}
+	if a.photos.fromPhotos || a.photos.sel != 1 || a.photos.index != 0 {
+		t.Fatalf("the sheet preview moved the grid: fromPhotos=%v sel=%d index=%d",
+			a.photos.fromPhotos, a.photos.sel, a.photos.index)
+	}
+	if a.photos.cache[filepath.Join(dir, m.Sheets[0].File)] == nil {
+		t.Errorf("the sheet was not decoded")
+	}
+	tt.Key(0, ui.KeySpace)
+	tt.Frame()
+	if a.photos.open {
+		t.Fatal("space did not close the sheet preview")
+	}
+}
+
+// The settings page offers starting at login, next to what closing the
+// window does.
+func TestSettingsLaunchGroup(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.openSettings()
+	tt := ui.NewTester(a.view, 1200, 1000)
+	tt.Frame()
+	for _, s := range []string{"启动与后台", "开机自动启动"} {
+		if !tt.HasText(s) {
+			t.Errorf("the settings page is missing %q", s)
+		}
+	}
 }

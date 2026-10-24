@@ -50,6 +50,7 @@ func (a *app) dayPage(c *ui.Context) {
 		})
 	})
 	a.systemPromptModal(c)
+	a.photoPreviewLayer(c)
 }
 
 // resetDayLayout restores the day's default widths: the chat at 370, the

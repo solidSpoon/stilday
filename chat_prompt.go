@@ -11,7 +11,7 @@ import (
 
 func (a *app) systemPrompt() string {
 	var b strings.Builder
-	b.WriteString(strings.TrimSpace(systemPromptBase))
+	b.WriteString(strings.TrimSpace(promptBase()))
 	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "今天是 %s。\n", a.chat.day)
 	fmt.Fprintf(&b, "当天的文件夹是 %s。\n\n", a.chat.dir)
@@ -28,28 +28,33 @@ func (a *app) systemPrompt() string {
 	return b.String()
 }
 
-type emittedEntry struct {
+type dayLogEntry struct {
 	Kind       string `json:"kind"`
 	Summary    string `json:"summary"`
-	Photo      *int   `json:"photo"`
 	OccurredAt string `json:"occurred_at"`
 	TS         string `json:"ts"` // old payloads; read-only
 }
 
-// emitEntries maps the model's stilday_emit payload into the day's JSONL
-// store. The mapping is Stilday's own: the model only says what it saw.
-func (a *app) emitEntries(details json.RawMessage) int {
+// saveDayEntries saves the model's log for the day. The payload is the
+// complete list: it replaces the day's entries, so a later chat can fix the
+// log by sending the whole list again.
+func (a *app) saveDayEntries(details json.RawMessage) int {
 	if len(details) == 0 {
 		return 0
 	}
 	var payload struct {
-		Entries []emittedEntry `json:"entries"`
+		Entries []dayLogEntry `json:"entries"`
 	}
 	if err := json.Unmarshal(details, &payload); err != nil {
-		a.chat.err = "stilday_emit: " + err.Error()
+		a.chat.err = "stilday_save_day: " + err.Error()
 		return 0
 	}
-	n := 0
+	day, err := time.Parse("2006-01-02", a.chat.day)
+	if err != nil {
+		a.chat.err = "stilday_save_day: " + err.Error()
+		return 0
+	}
+	entries := make([]Entry, 0, len(payload.Entries))
 	for _, e := range payload.Entries {
 		summary := strings.TrimSpace(e.Summary)
 		if summary == "" {
@@ -59,34 +64,39 @@ func (a *app) emitEntries(details json.RawMessage) int {
 		if kind == "" {
 			kind = "observation"
 		}
-		ts := time.Now()
 		stamp := e.OccurredAt
 		if stamp == "" {
 			stamp = e.TS
 		}
-		if stamp != "" {
-			if t, err := time.Parse(time.RFC3339, stamp); err == nil {
-				ts = t
-			}
+		ts, ok := parseStamp(stamp, day)
+		if !ok {
+			ts = time.Now()
 		}
-		if e.Photo != nil && a.chat.manifest != nil {
-			if p := a.chat.manifest.photo(*e.Photo); p != nil {
-				if t, err := time.Parse(time.RFC3339, p.CapturedAt); err == nil {
-					ts = t
-				}
-			}
-		}
-		a.addEntry(Entry{OccurredAt: ts, Day: a.chat.day, Kind: kind, Summary: summary})
-		n++
+		entries = append(entries, Entry{OccurredAt: ts, Day: a.chat.day, Kind: kind, Summary: summary})
 	}
-	return n
+	if len(entries) == 0 {
+		// An empty list would wipe the day; keep what is there.
+		return 0
+	}
+	if err := a.store.ClearDay(day); err != nil {
+		a.chat.err = "stilday_save_day: " + err.Error()
+		return 0
+	}
+	a.entries = nil
+	a.seq = 0
+	a.outputFocus = 0
+	for _, e := range entries {
+		a.addEntry(e)
+	}
+	a.boardDirty = true
+	return len(entries)
 }
 
 func toolDetail(ev agent.Event) string {
 	switch ev.ToolName {
 	case "day_overview":
 		return "已查看"
-	case "stilday_emit":
+	case "stilday_save_day":
 		if !ev.IsError {
 			var p struct {
 				Entries []json.RawMessage `json:"entries"`
@@ -106,4 +116,27 @@ func toolDetail(ev agent.Event) string {
 		}
 	}
 	return ""
+}
+
+// parseStamp reads occurred_at: RFC 3339, or the shapes the contact sheets
+// use (a local time, or a local date and time without an offset).
+func parseStamp(stamp string, day time.Time) (time.Time, bool) {
+	stamp = strings.TrimSpace(stamp)
+	if stamp == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, stamp); err == nil {
+		return t, true
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if t, err := time.ParseInLocation(layout, stamp, time.Local); err == nil {
+			return t, true
+		}
+	}
+	for _, layout := range []string{"15:04:05", "15:04"} {
+		if t, err := time.Parse(layout, stamp); err == nil {
+			return time.Date(day.Year(), day.Month(), day.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.Local), true
+		}
+	}
+	return time.Time{}, false
 }

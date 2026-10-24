@@ -21,7 +21,7 @@ while IFS= read -r line; do
       printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hello "}}'
       printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"world"}}'
       printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello world"}],"usage":{"input":12,"output":2,"totalTokens":14}}}'
-      printf '%s\n' '{"type":"tool_execution_end","toolCallId":"t1","toolName":"stilday_emit","result":{"content":[{"type":"text","text":"ok"}],"details":{"entries":[{"kind":"observation","summary":"saw a cat","photo":3}]}}}'
+      printf '%s\n' '{"type":"tool_execution_end","toolCallId":"t1","toolName":"stilday_save_day","result":{"content":[{"type":"text","text":"ok"}],"details":{"entries":[{"kind":"observation","summary":"saw a cat","photo":3}]}}}'
       printf '%s\n' '{"type":"agent_settled","aborted":false}'
       printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$id"
       ;;
@@ -48,7 +48,7 @@ func fakeClient(t *testing.T) *Client {
 		SystemPrompt: "system",
 		Provider:     "opencode-go",
 		Model:        "kimi-k3",
-		Tools:        []string{"day_overview", "stilday_emit"},
+		Tools:        []string{"day_overview", "stilday_save_day"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestPromptStreamsAndResults(t *testing.T) {
 	if text != "hello world" {
 		t.Errorf("assistant text %q", text)
 	}
-	if toolName != "stilday_emit" {
+	if toolName != "stilday_save_day" {
 		t.Errorf("tool %q", toolName)
 	}
 	if !strings.Contains(string(details), "saw a cat") {
@@ -99,7 +99,7 @@ func TestPromptStreamsAndResults(t *testing.T) {
 func TestArgsCarrySessionAndTools(t *testing.T) {
 	c := fakeClient(t)
 	argv := strings.Join(c.Argv(), " ")
-	for _, want := range []string{"--mode rpc", "--session-id stilday-2026-10-23", "--session-dir", "-e", "--provider opencode-go", "--model kimi-k3", "--tools day_overview,stilday_emit", "--append-system-prompt"} {
+	for _, want := range []string{"--mode rpc", "--session-id stilday-2026-10-23", "--session-dir", "-e", "--provider opencode-go", "--model kimi-k3", "--tools day_overview,stilday_save_day", "--append-system-prompt"} {
 		if !strings.Contains(argv, want) {
 			t.Errorf("argv %q does not contain %q", argv, want)
 		}

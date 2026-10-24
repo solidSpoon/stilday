@@ -13,48 +13,96 @@ import (
 // has to know that this one plugin collects a span of days.
 const photosCollectorID = "photos"
 
-type photosCollector struct{}
+// photosSettings is the photos collector's own settings, kept in
+// <storage>/plugins/photos/settings.json.
+type photosSettings struct {
+	Days        int               `json:"days"`         // sync this many recent days
+	KeepRemoved bool              `json:"keep_removed"` // keep photos the library no longer has
+	Schedule    collectorSchedule `json:"schedule"`     // when it runs by itself
+}
 
-func (photosCollector) ID() string   { return photosCollectorID }
-func (photosCollector) Name() string { return "相册照片" }
-func (photosCollector) Description() string {
+// photosCollector is the photos plugin: its settings, and the default
+// fingerprint of the folder it writes.
+type photosCollector struct {
+	fileSettings[photosSettings]
+	folderFingerprint
+}
+
+func newPhotosCollector() *photosCollector {
+	p := &photosCollector{
+		fileSettings: newFileSettings(photosCollectorID, photosSettings{
+			Days:        1,
+			KeepRemoved: true,
+			Schedule:    collectorSchedule{Enabled: true, Time: "22:00"},
+		}),
+		folderFingerprint: folderFingerprint{id: photosCollectorID},
+	}
+	// Another library is another source: its material must not look like
+	// the previous library's.
+	p.folderFingerprint.seed = func() string { return "v1|source=" + photosLibrary() }
+	return p
+}
+
+func (p *photosCollector) ID() string                   { return photosCollectorID }
+func (p *photosCollector) Name() string                 { return "相册照片" }
+func (p *photosCollector) Folder() string               { return "previews" }
+func (p *photosCollector) Icon() *ui.SVG                { return iconPhotos }
+func (p *photosCollector) Manifest() string             { return "manifest.json" }
+func (p *photosCollector) Schedule() *collectorSchedule { return &p.value.Schedule }
+func (p *photosCollector) Description() string {
 	return "从 macOS 照片图库收集这一天的照片。"
 }
-func (photosCollector) Folder() string   { return "previews" }
-func (photosCollector) Icon() *ui.SVG    { return iconPhotos }
-func (photosCollector) Manifest() string { return "manifest.json" }
 
-// FingerprintSeed treats another library as a different source, so its
-// material is not mistaken for the previous library's.
-func (photosCollector) FingerprintSeed() string {
-	return "v1|source=" + photosLibrary()
+// KeepsFolder keeps the day's previews when a photo the library lost
+// should stay.
+func (p *photosCollector) KeepsFolder() bool { return p.value.KeepRemoved }
+
+// adoptLegacySettings takes what collectors.json said about this plugin,
+// when it has no settings file of its own yet.
+func (p *photosCollector) adoptLegacySettings(old legacyCollectorSettings) {
+	if p.path != "" {
+		if _, err := os.Stat(p.path); err == nil {
+			return
+		}
+	}
+	if old.Photos.Days > 0 {
+		p.value.Days = old.Photos.Days
+	}
+	if old.Photos.KeepRemoved != nil {
+		p.value.KeepRemoved = *old.Photos.KeepRemoved
+	}
+	if s := old.Schedules[p.ID()]; s != nil {
+		p.value.Schedule = *s
+	}
+	_ = p.SaveSettings()
 }
 
-func (photosCollector) Run(env collectorEnv, progress func(stage string, done, total int)) error {
+func (p *photosCollector) Run(env collectorEnv, progress func(stage string, done, total int)) error {
 	src := env.Photos
 	if src.Library == "" {
 		return fmt.Errorf("找不到 macOS 照片图库")
 	}
 	_, err := preparePhotos(env.Dir, photoOptions{
-		Source:    src.Library,
-		Day:       env.Day,
-		Start:     src.Start,
-		End:       src.End,
-		MaxPhotos: src.MaxPhotos,
-		SheetSize: sheetCols * sheetRows,
+		Source:      src.Library,
+		Day:         env.Day,
+		Start:       src.Start,
+		End:         src.End,
+		MaxPhotos:   src.MaxPhotos,
+		SheetSize:   sheetCols * sheetRows,
+		KeepRemoved: p.value.KeepRemoved,
 	}, progress)
 	return err
 }
 
-// View is the photos collector's global settings card: the source, the
-// quick recent-day range and the date policy.
-func (photosCollector) View(c *ui.Context, view collectorView) {
+// View is the photos collector's settings card: the source, the quick
+// recent-day range, and what happens to photos the library no longer has.
+func (p *photosCollector) View(c *ui.Context, view collectorView) {
 	t := c.Theme()
 	const labelW = 76
 	ranges := []int{1, 7, 30, 90}
 	idx := 0
 	for i, d := range ranges {
-		if view.Photos.Days == d {
+		if p.value.Days == d {
 			idx = i
 			break
 		}
@@ -62,8 +110,17 @@ func (photosCollector) View(c *ui.Context, view collectorView) {
 	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "同步范围").FontSize(11).TextColor(t.TextMuted).Width(labelW)
 		if ui.Segmented(c, &idx, "一天", "一周", "一个月", "三个月").Label("同步最近").Changed() {
-			view.Photos.Days = ranges[idx]
+			p.value.Days = ranges[idx]
 		}
+	})
+	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "相册删除").FontSize(11).TextColor(t.TextMuted).Width(labelW)
+		ui.Switch(c, &p.value.KeepRemoved).Label("保留相册里已删除的照片")
+		hint := "相册里删了，这边也跟着删"
+		if p.value.KeepRemoved {
+			hint = "只增不删：相册里删了，这边也留着"
+		}
+		ui.Text(c, hint).FontSize(10.5).TextColor(t.TextMuted)
 	})
 	if view.Manifest != nil && view.Manifest.PhotoNote != "" {
 		ui.Row(c).Gap(10).AlignItems(ui.Start).Children(func() {
@@ -100,17 +157,18 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 	if !a.cfg.configured() || !a.canStartWork() {
 		return
 	}
-	p := a.collectorByID(photosCollectorID)
+	p := a.photosPlugin()
 	if p == nil {
 		return
 	}
-	days := a.collectorCfg.Photos.Days
+	days := p.value.Days
 	if days < 1 {
 		days = 1
 	}
 	now := a.clockNow()
 	today := midnight(now)
 	cfg := a.cfg
+	keepRemoved := p.KeepsFolder()
 	collectors := a.collectorList
 	selectedDir := a.chat.dir
 	a.beginCollection(photosCollectorID, "准备同步…")
@@ -135,12 +193,18 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 				saveErr = err
 			}
 
-			// The plugin's generated material is replaced, not merged. The
-			// old photos/ folder is a leftover of the previous layout.
-			for _, name := range []string{"photos", "previews", "thumbs", "sheets"} {
+			// The plugin's generated material is replaced, not merged,
+			// unless the day keeps what it has: then only the derived
+			// folders are rebuilt. The old photos/ folder is a leftover
+			// of the previous layout either way.
+			drop := []string{"photos", "sheets"}
+			if !keepRemoved {
+				drop = append(drop, "previews", "thumbs")
+			}
+			for _, name := range drop {
 				_ = os.RemoveAll(filepath.Join(dir, name))
 			}
-			env, envErr := collectorEnvFor(cfg, day, dir)
+			env, envErr := collectorEnvFor(cfg, p, day, dir)
 			var runErr error
 			if envErr != nil {
 				runErr = envErr
@@ -153,7 +217,7 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 				run.Status = "error"
 				run.Error = runErr.Error()
 			} else {
-				run.recordFingerprint(fingerprintOf(dir, p))
+				run.recordFingerprint(p.Fingerprint(env))
 			}
 			state.Items[p.ID()] = run
 			if err := saveCollectorDay(dir, state); err != nil {

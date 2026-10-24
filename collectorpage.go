@@ -22,8 +22,6 @@ func (a *app) collectorPage(c *ui.Context) {
 		}
 	}, func() {
 		beforeCfg := a.cfg
-		beforePhotos := a.collectorCfg.Photos
-		beforeSchedules := cloneSchedules(a.collectorCfg.Schedules)
 		ui.Row(c).Fill().Children(func() {
 			ui.Scroll(c).Grow(1).MinWidth(0).FillHeight().
 				Padding(barHeight+24, 28, 24).ScrollbarInsets(barHeight+8, 0, 0).Gap(16).Children(func() {
@@ -35,15 +33,16 @@ func (a *app) collectorPage(c *ui.Context) {
 		if a.cfg != beforeCfg {
 			a.collectorAppDirty = true
 		}
-		if a.collectorCfg.Photos != beforePhotos ||
-			!schedulesEqual(a.collectorCfg.Schedules, beforeSchedules) {
-			a.collectorCfgDirty = true
+		for _, p := range a.collectorList {
+			if p.SettingsChanged() {
+				a.collectorSettingsDirty = true
+			}
 		}
 		switch {
 		case a.win == nil:
 			// No frame loop (tests): persist now so the result is visible.
 			a.flushCollectorPage()
-		case a.collectorAppDirty || a.collectorCfgDirty:
+		case a.collectorAppDirty || a.collectorSettingsDirty:
 			a.scheduleCollectorFlush()
 		}
 	})
@@ -259,7 +258,10 @@ func (a *app) collectorRow(c *ui.Context, p collector) {
 			}
 		})
 
-		s := a.collectorSchedule(p.ID())
+		s := p.Schedule()
+		if s == nil {
+			s = &collectorSchedule{}
+		}
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Switch(c, &s.Enabled).Label("启用")
 			if s.Enabled {
@@ -275,24 +277,32 @@ func (a *app) collectorRow(c *ui.Context, p collector) {
 				a.runCollectorNow(p.ID())
 			}
 		})
-		p.View(c, collectorView{Photos: &a.collectorCfg.Photos, Manifest: a.chat.manifest})
+		p.View(c, collectorView{Manifest: a.chat.manifest})
 	})
 }
 
+// saveCollectorSettings checks each plugin's schedule, then writes the
+// settings that changed to the plugins' own folders.
 func (a *app) saveCollectorCfg() {
-	for id, s := range a.collectorCfg.Schedules {
+	for _, p := range a.collectorList {
+		s := p.Schedule()
 		if s == nil || strings.TrimSpace(s.Time) == "" {
 			continue
 		}
 		s.Time = normalizeClock(s.Time)
 		if _, err := clockOn(a.day, s.Time); err != nil {
-			a.settingsErr = "采集时间要写成 HH:MM：" + id
+			a.settingsErr = "采集时间要写成 HH:MM：" + p.ID()
 			return
 		}
 	}
-	if err := saveCollectorSettings(a.cfg.storageRoot(), a.collectorCfg); err != nil {
-		a.settingsErr = "保存采集器设置：" + err.Error()
-		return
+	for _, p := range a.collectorList {
+		if !p.SettingsChanged() {
+			continue
+		}
+		if err := p.SaveSettings(); err != nil {
+			a.settingsErr = "保存 " + p.Name() + " 的设置：" + err.Error()
+			return
+		}
 	}
 	a.settingsErr = ""
 }

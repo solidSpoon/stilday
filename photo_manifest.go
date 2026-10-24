@@ -45,21 +45,24 @@ type photoMeta struct {
 }
 
 type photo struct {
-	Index      int        `json:"index"`
-	Preview    string     `json:"preview"` // previews/NNN.jpg, up to 1600px
-	Thumb      string     `json:"thumb"`   // thumbs/NNN.jpg, up to 360px for the UI
-	Read       string     `json:"read"`    // the 1600px preview, the only image the read tool needs
-	CapturedAt string     `json:"captured_at"`
-	Sheet      int        `json:"sheet"`            // 1-based
-	SheetFile  string     `json:"sheet_file"`       // sheets/NN.jpg
-	Cell       int        `json:"cell"`             // 1-based, row-major within the sheet
-	CellRow    int        `json:"cell_row"`         // 1-based
-	CellCol    int        `json:"cell_col"`         // 1-based
-	Width      int        `json:"width,omitempty"`  // original width
-	Height     int        `json:"height,omitempty"` // original height
-	Bytes      int64      `json:"bytes,omitempty"`
-	Format     string     `json:"format,omitempty"`
-	Meta       *photoMeta `json:"meta,omitempty"`
+	Index      int    `json:"index"`
+	Preview    string `json:"preview"` // previews/NNN.jpg, up to 1600px
+	Thumb      string `json:"thumb"`   // thumbs/NNN.jpg, up to 360px for the UI
+	Read       string `json:"read"`    // the 1600px preview, the only image the read tool needs
+	CapturedAt string `json:"captured_at"`
+	Sheet      int    `json:"sheet"`            // 1-based
+	SheetFile  string `json:"sheet_file"`       // sheets/NN.jpg
+	Cell       int    `json:"cell"`             // 1-based, row-major within the sheet
+	CellRow    int    `json:"cell_row"`         // 1-based
+	CellCol    int    `json:"cell_col"`         // 1-based
+	Width      int    `json:"width,omitempty"`  // original width
+	Height     int    `json:"height,omitempty"` // original height
+	Bytes      int64  `json:"bytes,omitempty"`
+	Format     string `json:"format,omitempty"`
+	// SourceID is the PhotoKit asset's identifier, which tells the same
+	// photo apart across scans; a folder source has none.
+	SourceID string     `json:"source_id,omitempty"`
+	Meta     *photoMeta `json:"meta,omitempty"`
 }
 
 // sheet is one contact sheet: numbered thumbnails in capture order.
@@ -132,6 +135,9 @@ type photoOptions struct {
 	End       time.Time
 	MaxPhotos int
 	SheetSize int
+	// KeepRemoved keeps the photos the day already has when the library
+	// no longer holds them.
+	KeepRemoved bool
 }
 
 const (

@@ -77,7 +77,7 @@ func composeSheet(day time.Time, sh sheet, total int, photos []photo, dst string
 	drawText(img, regular, fmt.Sprintf("%s  ·  Sheet %d/%d", day.Format("2006-01-02"), sh.Index, total), sheetPad, 36, ink)
 	from, _ := time.Parse(time.RFC3339, sh.From)
 	to, _ := time.Parse(time.RFC3339, sh.To)
-	drawText(img, small, fmt.Sprintf("%s–%s  ·  #%d–#%d", from.Format("15:04"), to.Format("15:04"), sh.First, sh.Last), sheetPad, 54, muted)
+	drawText(img, small, fmt.Sprintf("%s–%s  ·  #%03d–#%03d", from.Format("15:04"), to.Format("15:04"), sh.First, sh.Last), sheetPad, 54, muted)
 
 	for i, p := range photos {
 		col, row := i%sheetCols, i/sheetCols
@@ -97,7 +97,7 @@ func composeSheet(day time.Time, sh sheet, total int, photos []photo, dst string
 		label := image.Rect(x, y+cellH, x+cellW, y+cellH+labelH)
 		draw.Draw(img, label, &image.Uniform{color.RGBA{0x1C, 0x1C, 0x1F, 0xFF}}, image.Point{}, draw.Src)
 		at, _ := time.Parse(time.RFC3339, p.CapturedAt)
-		drawText(img, mono, fmt.Sprintf("#%d  %s", p.Index, at.Format("15:04")), x+8, y+cellH+16, color.RGBA{0xF4, 0xF4, 0xF5, 0xFF})
+		drawText(img, mono, fmt.Sprintf("#%03d  %s", p.Index, at.Format("15:04")), x+8, y+cellH+16, color.RGBA{0xF4, 0xF4, 0xF5, 0xFF})
 	}
 
 	out, err := os.Create(dst)

@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,30 +51,26 @@ func TestChatPageShowsPhotos(t *testing.T) {
 	}
 }
 
-// stilday_emit's payload becomes source:"ai" lines in the day's artifact.
-func TestEmitEntries(t *testing.T) {
+// stilday_save_day's payload replaces the day's log.
+func TestSaveDayEntries(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	a.chat.day = a.day.Format("2006-01-02")
 	a.chat.dir = a.cfg.workDayDir(a.day)
-	photoAt := time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 14, 5, 0, 0, a.day.Location())
-	a.chat.manifest = &manifest{Photos: []photo{
-		{Index: 3, CapturedAt: photoAt.Format(time.RFC3339)},
-	}}
-	before := len(a.entries)
-	payload := json.RawMessage(`{"entries":[
-		{"kind":"place","summary":"在咖啡馆写了两个小时代码","photo":3,"data":{"place":"Blue Bottle"}},
-		{"kind":"task","summary":"完成了照片合集原型"},
+	at := time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 14, 5, 0, 0, a.day.Location()).Format(time.RFC3339)
+	payload := json.RawMessage(fmt.Sprintf(`{"entries":[
+		{"kind":"activity","summary":"在咖啡馆写了两个小时代码","occurred_at":%q,"data":{"place":"Blue Bottle"}},
+		{"kind":"observation","summary":"完成了照片合集原型","occurred_at":%q},
 		{"kind":"","summary":""}
-	]}`)
-	if n := a.emitEntries(payload); n != 2 {
-		t.Fatalf("recorded %d entries, want 2", n)
+	]}`, at, at))
+	if n := a.saveDayEntries(payload); n != 2 {
+		t.Fatalf("saved %d entries, want 2", n)
 	}
-	if got := len(a.entries); got != before+2 {
-		t.Fatalf("%d entries, want %d", got, before+2)
+	if got := len(a.entries); got != 2 {
+		t.Fatalf("%d entries, want 2", got)
 	}
-	e := a.entries[len(a.entries)-2]
-	if e.Kind != "place" || e.Summary != "在咖啡馆写了两个小时代码" {
+	e := a.entries[0]
+	if e.Kind != "activity" || e.Summary != "在咖啡馆写了两个小时代码" {
 		t.Errorf("entry is %+v", e)
 	}
 	if e.Day != a.chat.day {
@@ -81,12 +79,35 @@ func TestEmitEntries(t *testing.T) {
 	if e.OccurredAt.Format("15:04") != "14:05" {
 		t.Errorf("time is %s", e.OccurredAt.Format("15:04"))
 	}
+
+	// A second call is the new log, not an addition.
+	at = time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 9, 0, 0, 0, a.day.Location()).Format(time.RFC3339)
+	again := json.RawMessage(fmt.Sprintf(
+		`{"entries":[{"kind":"activity","summary":"早上在楼下买了咖啡","occurred_at":%q}]}`, at))
+	if n := a.saveDayEntries(again); n != 1 {
+		t.Fatalf("saved %d entries, want 1", n)
+	}
+	if got := len(a.entries); got != 1 || a.entries[0].Summary != "早上在楼下买了咖啡" {
+		t.Fatalf("entries after the second save: %+v", a.entries)
+	}
+	if got := a.entries[0].OccurredAt.Format("15:04"); got != "09:00" {
+		t.Fatalf("time after the second save: %s", got)
+	}
+
+	// The contact sheets show HH:MM; accept that shape too.
+	third := json.RawMessage(`{"entries":[{"kind":"food","summary":"中午吃了面","occurred_at":"11:28"}]}`)
+	if n := a.saveDayEntries(third); n != 1 {
+		t.Fatalf("saved %d entries, want 1", n)
+	}
+	if got := a.entries[0].OccurredAt.Format("15:04"); got != "11:28" {
+		t.Fatalf("HH:MM time: %s", got)
+	}
 	lines, err := os.ReadFile(a.store.Path(a.day))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lines) == 0 {
-		t.Fatal("nothing was written to the artifact")
+	if got := strings.Count(strings.TrimSpace(string(lines)), "\n") + 1; got != 1 {
+		t.Fatalf("%d lines in the artifact, want 1", got)
 	}
 }
 
@@ -124,22 +145,22 @@ func TestAgentEvents(t *testing.T) {
 		t.Fatalf("transcript: %v %q", err, lines)
 	}
 
-	a.handleAgentEvent(agent.Event{Type: "tool_execution_start", ToolID: "t1", ToolName: "stilday_emit"})
+	a.handleAgentEvent(agent.Event{Type: "tool_execution_start", ToolID: "t1", ToolName: "stilday_save_day"})
 	a.handleAgentEvent(agent.Event{
-		Type: "tool_execution_end", ToolID: "t1", ToolName: "stilday_emit",
+		Type: "tool_execution_end", ToolID: "t1", ToolName: "stilday_save_day",
 		Result: agent.ToolResult{Details: json.RawMessage(`{"entries":[
 			{"kind":"observation","summary":"在咖啡馆工作"},
 			{"kind":"observation","summary":"下午去了超市"}
 		]}`)},
 	})
 	if n := len(a.entries); n < 2 {
-		t.Fatalf("%d entries after stilday_emit", n)
+		t.Fatalf("%d entries after stilday_save_day", n)
 	}
 	last := a.entries[len(a.entries)-1]
 	if last.Kind != "observation" || last.Summary != "下午去了超市" {
 		t.Errorf("last entry is %+v", last)
 	}
-	if got := a.chat.messages[len(a.chat.messages)-1].ToolDetail; got != "记录 2 条" {
+	if got := a.chat.messages[len(a.chat.messages)-1].ToolDetail; got != "保存 2 条" {
 		t.Errorf("tool detail %q", got)
 	}
 }
@@ -157,12 +178,26 @@ func TestSendWithoutPi(t *testing.T) {
 	}
 }
 
+// A conversation stored before the current prompt was generated still
+// opens on the current prompt, so the drawer shows today's kinds.
+func TestSystemPromptDrawerIgnoresStaleCopy(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.chat.messages = []*chatMessage{{Role: "system", Text: "旧的系统提示", Done: true, TS: a.now}}
+	if got := a.promptForDrawer(); !strings.Contains(got, "type StildaySaveDayArgs") {
+		t.Fatalf("the drawer shows the stale copy: %q", got)
+	}
+}
+
 func TestSystemPromptMessage(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	a.page = "day"
 	a.openDay(a.day)
-	a.chat.messages = []*chatMessage{{ID: 1, Role: "system", Text: "这是测试系统提示。", Done: true, TS: a.now}}
+	a.chat.messages = []*chatMessage{{
+		ID: 1, Role: "system", Done: true, TS: a.now,
+		Text: promptBase() + "\n\n这是测试系统提示。",
+	}}
 	a.chat.nextID = 1
 	tt := ui.NewTester(a.view, 1300, 820)
 	tt.Frame()

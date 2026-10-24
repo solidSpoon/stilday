@@ -63,7 +63,7 @@ func TestShots(t *testing.T) {
 		{ID: 1, Role: "user", Text: "先看今天的照片，概述今天。", Done: true, Images: 1, TS: a.now.Add(-4 * time.Minute)},
 		{ID: 2, Role: "tool", Tool: "day_overview", ToolStatus: "done", ToolDetail: "已查看", Done: true, TS: a.now.Add(-3 * time.Minute)},
 		{ID: 3, Role: "assistant", Text: "今天大部分时间在 **咖啡馆写代码**，下午去了一趟超市。\n\n- 09:12 在家打开电脑\n- 11:40 到 Blue Bottle，一直写到 15:30\n- 17:20 超市采购，买了牛奶和水果\n\n已经把这些记到了今天的 JSONL 里。", Done: true, TS: a.now.Add(-2 * time.Minute)},
-		{ID: 4, Role: "tool", Tool: "stilday_emit", ToolStatus: "done", ToolDetail: "记录 3 条", Done: true, TS: a.now.Add(-90 * time.Second)},
+		{ID: 4, Role: "tool", Tool: "stilday_save_day", ToolStatus: "done", ToolDetail: "保存 3 条", Done: true, TS: a.now.Add(-90 * time.Second)},
 		{ID: 5, Role: "user", Text: "下午在咖啡馆主要做了什么？", Done: true, TS: a.now.Add(-60 * time.Second)},
 	}
 	a.chat.nextID = 5
@@ -150,6 +150,38 @@ func TestShots(t *testing.T) {
 	a.entries = nil
 	tt.Frame()
 	save("day-empty")
+	// The preview layer: the day's photo over the dimmed window.
+	a.selectPhoto(min(2, len(a.chat.manifest.Photos)-1))
+	a.openPhoto()
+	tt.Frame()
+	save("photo-preview")
+	a.photos.open = false
+	// The chosen photo keeps a ring in the grid.
+	a.photos.sel = 0
+	tt.Frame()
+	save("photo-selected")
+	a.photos.sel = -1
+	tt.Frame()
+	// The pointer over a tile: the frame stays put and the picture inside
+	// it zooms.
+	if r, ok := tt.Find("大图 2"); ok {
+		tt.Move(r.X+r.W/2, r.Y+r.H/2)
+		tt.Advance(400 * time.Millisecond)
+		save("photo-hover")
+		tt.Move(0, 0)
+	}
+	// A contact sheet previews too, with its span of time.
+	a.openPreview(a.sheetPreviews(), 0, false)
+	tt.Frame()
+	save("sheet-preview")
+	a.closePreview()
+	tt.Frame()
+	// The assistant is thinking: the three-dot bubble above the composer.
+	a.chat.messages = []*chatMessage{{ID: 99, Role: "assistant", Done: false, TS: a.now}}
+	tt.Frame()
+	save("day-thinking")
+	a.chat.messages = nil
+	tt.Frame()
 	// The collectors page with a background analysis: the queue, a
 	// cancelled day, and the status bar in the sidebar.
 	a.chat.messages = nil
