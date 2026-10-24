@@ -35,8 +35,8 @@ func TestChatPageShowsPhotos(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.resetForDay()
-	a.chat.piPath = "/usr/local/bin/pi"
-	a.chat.piErr = ""
+	a.piPath = "/usr/local/bin/pi"
+	a.piErr = ""
 
 	tt := ui.NewTester(a.view, 1300, 820)
 	tt.Frame()
@@ -122,13 +122,13 @@ func TestAgentEvents(t *testing.T) {
 	a.chat.day = a.day.Format("2006-01-02")
 	a.chat.byCall = map[string]*chatMessage{}
 
-	a.handleAgentEvent(agent.Event{Type: "agent_start"})
-	a.handleAgentEvent(agent.Event{Type: "message_start", Message: agent.Message{Role: "assistant"}})
-	a.handleAgentEvent(agent.Event{
+	a.handleAgentEvent(a.chat, agent.Event{Type: "agent_start"})
+	a.handleAgentEvent(a.chat, agent.Event{Type: "message_start", Message: agent.Message{Role: "assistant"}})
+	a.handleAgentEvent(a.chat, agent.Event{
 		Type:   "message_update",
 		Update: agent.AssistantEvent{Type: "text_delta", Delta: "这一天在咖啡馆。"},
 	})
-	a.handleAgentEvent(agent.Event{
+	a.handleAgentEvent(a.chat, agent.Event{
 		Type: "message_end",
 		Message: agent.Message{Role: "assistant", Content: []agent.Content{
 			{Type: "text", Text: "这一天在咖啡馆。"},
@@ -145,8 +145,8 @@ func TestAgentEvents(t *testing.T) {
 		t.Fatalf("transcript: %v %q", err, lines)
 	}
 
-	a.handleAgentEvent(agent.Event{Type: "tool_execution_start", ToolID: "t1", ToolName: "stilday_save_day"})
-	a.handleAgentEvent(agent.Event{
+	a.handleAgentEvent(a.chat, agent.Event{Type: "tool_execution_start", ToolID: "t1", ToolName: "stilday_save_day"})
+	a.handleAgentEvent(a.chat, agent.Event{
 		Type: "tool_execution_end", ToolID: "t1", ToolName: "stilday_save_day",
 		Result: agent.ToolResult{Details: json.RawMessage(`{"entries":[
 			{"kind":"observation","summary":"在咖啡馆工作"},
@@ -170,8 +170,8 @@ func TestSendWithoutPi(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	t.Setenv("STILDAY_PI", filepath.Join(t.TempDir(), "no-pi"))
-	a.chat.piPath = ""
-	a.chat.piErr = "找不到 pi"
+	a.piPath = ""
+	a.piErr = "找不到 pi"
 	a.sendChat("hello")
 	if a.chat.err == "" {
 		t.Fatal("sending without Pi reported no error")

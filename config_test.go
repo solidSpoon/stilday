@@ -13,7 +13,7 @@ func TestConfigWithDefaults(t *testing.T) {
 	if c.Provider == "" || c.Model == "" {
 		t.Errorf("provider = %q model = %q", c.Provider, c.Model)
 	}
-	if c.CollectTime != "22:00" || c.AutoTime != "10:00" {
+	if c.CollectTime != "21:00" || c.AutoTime != "22:00" {
 		t.Errorf("clocks = %q, %q", c.CollectTime, c.AutoTime)
 	}
 

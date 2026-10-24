@@ -95,8 +95,5 @@ func (a *app) dayTitle() (title, subtitle string) {
 		}
 	}
 	subtitle = dayLabel(a.day)
-	if a.chat.dir != "" {
-		subtitle += " · " + shortenPath(a.chat.dir)
-	}
 	return title, subtitle
 }

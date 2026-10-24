@@ -54,10 +54,10 @@ func TestShots(t *testing.T) {
 	a.chat.day = a.day.Format("2006-01-02")
 	a.chat.dir = dir
 	a.chat.manifest = m
-	a.chat.sheets = a.decodeSheets(m)
-	a.chat.thumbs = a.decodeThumbs(m)
-	a.chat.piPath = "/usr/local/bin/pi"
-	a.chat.piErr = ""
+	a.chat.sheets = a.decodeSheets(a.chat, m)
+	a.chat.thumbs = a.decodeThumbs(a.chat, m)
+	a.piPath = "/usr/local/bin/pi"
+	a.piErr = ""
 	a.chat.sheetsSent = true
 	a.chat.messages = []*chatMessage{
 		{ID: 1, Role: "user", Text: "先看今天的照片，概述今天。", Done: true, Images: 1, TS: a.now.Add(-4 * time.Minute)},
@@ -182,24 +182,21 @@ func TestShots(t *testing.T) {
 	save("day-thinking")
 	a.chat.messages = nil
 	tt.Frame()
-	// The collectors page with a background analysis: the queue, a
-	// cancelled day, and the status bar in the sidebar.
+	// The collectors page with the analysis tasks: two waiting days and
+	// one cancelled.
 	a.chat.messages = nil
 	a.page = "collectors"
+	a.now = time.Date(a.now.Year(), a.now.Month(), a.now.Day(), 9, 0, 0, 0, time.Local)
+	a.cfg.AutoTime = "10:00"
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-19"] = true
 	a.calendarChanged["2026-10-18"] = true
-	// Keep the daily batch start out of the shot: it would switch away
-	// from the collectors page.
-	a.autoAnalyzeDay = dayKey(a.day)
-	a.analysis.Queue = []string{"2026-10-20", "2026-10-19"}
-	a.analysis.Cancelled["2026-10-18"] = time.Now()
+	a.syncAnalysisTasks()
+	for _, task := range a.scheduler().Tasks() {
+		if task.Day == "2026-10-18" {
+			a.scheduler().Cancel(task.ID)
+		}
+	}
 	tt.Frame()
 	save("collectors-tasks")
-	a.analysis.Running, a.analysis.Current = true, "2026-10-20"
-	a.analysis.Queue = []string{"2026-10-19"}
-	delete(a.calendarChanged, "2026-10-18")
-	delete(a.analysis.Cancelled, "2026-10-18")
-	tt.Frame()
-	save("collectors-running")
 }

@@ -15,7 +15,9 @@ import (
 
 // beginCollection marks a run as started, on the UI thread.
 func (a *app) beginCollection(id, progress string) {
+	a.markCollectorRun(id)
 	a.collecting = true
+	a.collectStarted = time.Now()
 	a.collectID = id
 	a.collectProgress = progress
 	a.chat.preparing = true
@@ -25,6 +27,7 @@ func (a *app) beginCollection(id, progress string) {
 // finishCollection clears the run status.
 func (a *app) finishCollection() {
 	a.collecting = false
+	a.collectStarted = time.Time{}
 	a.collectID = ""
 	a.collectProgress = ""
 	a.chat.preparing = false
@@ -88,17 +91,17 @@ func (a *app) collectorProgress(id, prefix string) func(stage string, done, tota
 	}
 }
 
-// startCollector clears one collector's folder and runs it. auto is set
-// when this run is part of the nightly pipeline, which the status records.
-func (a *app) startCollector(p collector, auto bool) {
+// startCollector clears one collector's folder and runs it. It reports
+// whether it took the conversation slot.
+func (a *app) startCollector(p collector) bool {
 	if p == nil || a.chat.dir == "" || !a.takeConversationSlot() {
-		return
+		return false
 	}
 	day, dir := a.day, a.chat.dir
 	env, err := a.collectorEnv(p, day, dir)
 	if err != nil {
 		a.chat.err = p.Name() + "：" + err.Error()
-		return
+		return false
 	}
 	if a.collectorDay.Items == nil {
 		a.collectorDay.Items = map[string]collectorRun{}
@@ -106,9 +109,6 @@ func (a *app) startCollector(p collector, auto bool) {
 	run := a.collectorDay.Items[p.ID()]
 	run.Status = "running"
 	run.StartedAt = time.Now().Format(time.RFC3339)
-	if auto {
-		run.AutoAt = a.clockNow().Format(time.RFC3339)
-	}
 	run.FinishedAt = ""
 	run.Error = ""
 	a.collectorDay.Items[p.ID()] = run
@@ -122,12 +122,13 @@ func (a *app) startCollector(p collector, auto bool) {
 		// observable and no worker mutates app state behind the caller.
 		err := a.execCollector(p, dir, env)
 		a.finishCollector(p, day, dir, env, err)
-		return
+		return true
 	}
 	go func() {
 		err := a.execCollector(p, dir, env)
 		a.win.Update(func() { a.finishCollector(p, day, dir, env, err) })
 	}()
+	return true
 }
 
 // execCollector replaces the plugin's folder and runs it, unless the
@@ -161,18 +162,27 @@ func (a *app) finishCollector(p collector, day time.Time, dir string, env collec
 		run.recordFingerprint(p.Fingerprint(env))
 	}
 	a.collectorDay.Items[p.ID()] = run
-	a.saveDayState(dir, a.collectorDay)
-	if err == nil {
-		a.reloadMaterials(dir)
+	if dayHasContent(dir) {
+		a.saveDayState(dir, a.collectorDay)
+		if err == nil {
+			a.reloadMaterials(dir)
+		}
+		syncDayManifest(dir, day, a.collectorDay, a.collectorList)
+	} else {
+		// Nothing was collected: no folder, no state.
+		_ = os.RemoveAll(dir)
+		delete(a.collectorDay.Items, p.ID())
 	}
-	syncDayManifest(dir, day, a.collectorDay, a.collectorList)
 	a.reloadCalendar()
+	a.syncAnalysisTasks()
 
 	if len(a.collectQueue) > 0 {
 		next := a.collectorByID(a.collectQueue[0])
 		a.collectQueue = a.collectQueue[1:]
-		a.startCollector(next, false)
+		a.startCollector(next)
+		return
 	}
+	a.pumpConversation()
 }
 
 // startAllCollectors runs every registered collector in order.
@@ -189,7 +199,7 @@ func (a *app) startAllCollectors() {
 	}
 	first := a.collectorByID(a.collectQueue[0])
 	a.collectQueue = a.collectQueue[1:]
-	a.startCollector(first, false)
+	a.startCollector(first)
 }
 
 // startCollectorID runs one collector by ID, as the page's Execute button
@@ -199,99 +209,7 @@ func (a *app) startCollectorID(id string) {
 	if p == nil {
 		return
 	}
-	a.startCollector(p, false)
-}
-
-// maybeAutoCollect starts each enabled plugin at its own daily time. A
-// plugin that already started today at or after its time is left alone.
-// A manual conversation keeps the slot; the analysis queue yields to the
-// collection, which changes the material under it.
-func (a *app) maybeAutoCollect() {
-	if !a.cfg.configured() || !a.canStartCollector() {
-		return
-	}
-	now := a.clockNow()
-	today := midnight(now)
-	for _, p := range a.collectorList {
-		s := p.Schedule()
-		if s == nil || !s.Enabled {
-			continue
-		}
-		at, err := clockOn(today, s.Time)
-		if err != nil || now.Before(at) {
-			continue
-		}
-		state := loadCollectorDay(a.cfg.workDayDir(today))
-		if run, ok := state.Items[p.ID()]; ok && startedAfter(run, at) {
-			continue
-		}
-		if a.syncRangeCollector(p.ID(), true) {
-			return
-		}
-		if !sameDay(a.day, today) || a.page != pageDay {
-			a.selectDay(today)
-			return
-		}
-		if a.chat.loaded {
-			a.startCollector(p, true)
-		}
-		return
-	}
-}
-
-// startedAfter reports whether a collector already ran at or after at.
-func startedAfter(run collectorRun, at time.Time) bool {
-	stamp := run.AutoAt
-	if stamp == "" {
-		stamp = run.StartedAt
-	}
-	if stamp == "" {
-		return false
-	}
-	started, err := time.Parse(time.RFC3339, stamp)
-	return err == nil && !started.Before(at)
-}
-
-// maybeAutoAnalyze starts every pending day once the daily analysis time
-// arrives. It does not wait for the collectors: the scan only marks the
-// days it changed, and this task starts whatever is marked. With nothing
-// marked it does nothing and tries again the next day.
-func (a *app) maybeAutoAnalyze() {
-	if !a.cfg.configured() || a.analysis.Running || a.analysis.Paused {
-		return
-	}
-	now := a.clockNow()
-	today := midnight(now)
-	at, err := clockOn(today, a.cfg.AutoTime)
-	if err != nil || now.Before(at) {
-		return
-	}
-	key := dayKey(today)
-	if a.autoAnalyzeDay == key {
-		return
-	}
-	// A collector or a manual conversation owns the conversation slot while
-	// it runs. Wait for it instead of starting in the middle and missing
-	// the slot; this is a runtime lock, not a scheduling dependency.
-	if !a.chatIdle() {
-		return
-	}
-	a.autoAnalyzeDay = key
-	a.analysis.StartPending()
-}
-
-// markAutoDay records that the nightly pipeline ran, so opening the app
-// again after 22:00 does not repeat it.
-func (a *app) markAutoDay(day time.Time) {
-	dir := a.cfg.workDayDir(day)
-	state := loadCollectorDay(dir)
-	state.AutoAt = time.Now().Format(time.RFC3339)
-	a.saveDayState(dir, state)
-	syncDayManifest(dir, day, state, a.collectorList)
-	if a.chat.dir == dir {
-		a.collectorDay = state
-	}
-	a.refreshChangedDays()
+	a.startCollector(p)
 }
 
 // markAnalyzed records the fingerprint the model just read for every
@@ -334,33 +252,41 @@ func (a *app) reloadMaterials(dayDir string) {
 		return
 	}
 	a.chat.manifest = m
-	a.chat.sheets = a.decodeSheets(m)
-	a.chat.thumbs = a.decodeThumbs(m)
+	a.chat.sheets = a.decodeSheets(a.chat, m)
+	a.chat.thumbs = a.decodeThumbs(a.chat, m)
 }
 
-// markCollector records a finished photos preparation that did not go
-// through the collector queue, as openDay's first-run preparation does.
-func (a *app) markCollector(id, status, errText string) {
-	if a.chat.dir == "" {
+// markCollectorFor records that preparation for one day's folder, whether
+// or not that day is still the selected one.
+func (a *app) markCollectorFor(s *chatState, id, status, errText string) {
+	if s == nil || s.dir == "" {
 		return
 	}
-	if a.collectorDay.Items == nil {
-		a.collectorDay.Items = map[string]collectorRun{}
+	state := a.collectorDay
+	if s != a.chat {
+		state = loadCollectorDay(s.dir)
 	}
-	run := a.collectorDay.Items[id]
+	if state.Items == nil {
+		state.Items = map[string]collectorRun{}
+	}
+	run := state.Items[id]
 	run.Status = status
 	run.FinishedAt = time.Now().Format(time.RFC3339)
 	run.Error = errText
+	day := s.dayOf()
 	if status == "done" {
 		if p := a.collectorByID(id); p != nil {
-			if env, err := a.collectorEnv(p, a.day, a.chat.dir); err == nil {
+			if env, err := a.collectorEnv(p, day, s.dir); err == nil {
 				run.recordFingerprint(p.Fingerprint(env))
 			}
 		}
 	}
-	a.collectorDay.Items[id] = run
-	a.saveDayState(a.chat.dir, a.collectorDay)
-	syncDayManifest(a.chat.dir, a.day, a.collectorDay, a.collectorList)
+	state.Items[id] = run
+	a.saveDayState(s.dir, state)
+	syncDayManifest(s.dir, day, state, a.collectorList)
+	if a.chat == s {
+		a.collectorDay = state
+	}
 	a.refreshChangedDays()
 }
 
@@ -387,7 +313,7 @@ func shortCollectProgress(s string) string {
 
 func (a *app) collectTimeLabel() string {
 	if strings.TrimSpace(a.cfg.CollectTime) == "" {
-		return "22:00"
+		return "21:00"
 	}
 	return a.cfg.CollectTime
 }
@@ -398,18 +324,6 @@ func (a *app) clockNow() time.Time {
 		return time.Now()
 	}
 	return a.now
-}
-
-// dayHasCollectorFiles reports whether a collector folder has something in
-// it; empty folders are not a day's material.
-func dayHasCollectorFiles(collectors []collector, dir string) bool {
-	for _, p := range collectors {
-		entries, err := os.ReadDir(filepath.Join(dir, p.Folder()))
-		if err == nil && len(entries) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // flushCollectorPage persists edits the collector page made in an earlier

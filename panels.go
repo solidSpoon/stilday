@@ -521,7 +521,7 @@ func (a *app) outputPanel(c *ui.Context) {
 				hint = "正在整理照片，之后就可以分析这一天。"
 			case a.chat.busy:
 				hint = "正在分析，事件会陆续出现在这里。"
-			case a.chat.piErr != "":
+			case a.piErr != "":
 				hint = "还没有 Pi；在设置里下载后就能分析。"
 			}
 			emptyPane(c, iconEvents, "还没有事件", hint)
@@ -578,57 +578,70 @@ func (a *app) compactEventCard(c *ui.Context, e Entry, focus bool, bg ui.Color) 
 	return card
 }
 
-// startAnalysis asks the model to look at the day and write events.
-func (a *app) startAnalysis() {
+// startAnalysis asks the model to look at a day and write events, in that
+// day's own conversation. It is the manual action from the composer; the
+// scheduler's per-day tasks start their days through startAnalysisDay.
+func (a *app) startAnalysis(s *chatState) {
+	if s == nil {
+		s = a.chat
+	}
 	if !a.chatIdle() {
 		return
 	}
-	if a.chat.piErr != "" {
+	if a.piErr != "" {
 		a.openSettings()
 		return
 	}
-	if !a.hasProviderKey() {
+	if a.win != nil && !a.hasProviderKey() {
 		a.openSettings()
 		a.settingsErr = "先在设置里保存 API key，再分析这一天。"
 		return
 	}
-	if a.chat.dir == "" {
+	if s.dir == "" {
 		a.openDay(a.day)
+		s = a.chat
 	}
-	a.beginAnalysisSession()
-	a.addMessage(&chatMessage{Role: "system", Text: a.systemPrompt(), Done: true, TS: time.Now()})
-	a.chat.greetingPending = true
+	if !a.claimTurn(s, false) {
+		return
+	}
+	a.beginAnalysisSession(s)
+	a.addMessage(s, &chatMessage{Role: "system", Text: a.systemPromptFor(s.day, s.dir, s.manifest), Done: true, TS: time.Now()})
+	s.greetingPending = true
 	// Capture the sheets and the Pi target on the UI thread; the greeting
 	// worker must not read the app's state.
-	sheets := a.sheetData()
+	sheets := a.sheetDataFor(s)
 	target, _ := a.piTarget()
-	go a.prepareGreeting(target, sheets)
+	go a.prepareGreeting(s, target, sheets)
 }
 
-// beginAnalysisSession clears the previous analysis: its events, its
-// conversation, and its Pi session. The day's photos and manifest stay.
-func (a *app) beginAnalysisSession() {
-	a.restartConversation()
-	a.clearDayAnalysis(a.day, a.chat.dir)
-	a.entries = nil
-	a.outputFocus = 0
-	a.seq = 0
-	a.boardDirty = true
+// beginAnalysisSession clears the previous analysis of one day: its
+// events, its conversation, and its Pi session. The day's photos and
+// manifest stay.
+func (a *app) beginAnalysisSession(s *chatState) {
+	a.restartConversation(s)
+	day := s.dayOf()
+	a.clearDayAnalysis(day, s.dir)
+	if sameDay(day, a.day) {
+		a.entries = nil
+		a.outputFocus = 0
+		a.seq = 0
+		a.boardDirty = true
+	}
 }
 
 // restartConversation closes the agent and drops the thread, keeping the
 // day and the material it was built from.
-func (a *app) restartConversation() {
-	a.closeAgent()
-	a.chat.clearMessages()
-	a.chat.busy = false
-	a.chat.preparing = false
-	a.chat.progress = ""
-	a.chat.err = ""
-	a.chat.input = ""
-	a.chat.sheetsSent = false
-	a.chat.autoAnalyze = false
-	a.chat.systemOpen = false
+func (a *app) restartConversation(s *chatState) {
+	a.closeAgent(s)
+	s.clearMessages()
+	s.busy = false
+	s.preparing = false
+	s.progress = ""
+	s.err = ""
+	s.input = ""
+	s.sheetsSent = false
+	s.systemOpen = false
+	s.greetingPending = false
 }
 
 // clearDayAnalysis removes a day's artifact lines, transcript and Pi
@@ -670,7 +683,7 @@ func (a *app) reanalyze() {
 	if !a.canStartWork() {
 		return
 	}
-	a.startAnalysis()
+	a.startAnalysis(a.chat)
 }
 
 // clearAnalysis deletes the day's artifact and conversation, keeping the
@@ -685,8 +698,6 @@ func (a *app) clearAnalysis() {
 	a.entries = nil
 	a.outputFocus = 0
 	a.seq = 0
-	a.chat.forcePrep = true
-	a.chat.autoAnalyze = a.win != nil
 	a.boardDirty = true
 	a.reloadCalendar()
 	a.openDay(a.day)

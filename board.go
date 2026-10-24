@@ -41,7 +41,7 @@ func (a *app) boardPage(c *ui.Context) {
 		// The search is a control over content, so it is a pill of glass,
 		// as Calendar's search is.
 		ui.SearchField(c, &a.boardQuery).Width(220).Height(34).Radius(17).
-			Material(glass.Glass{}).Background(ui.Transparent).
+			Material(glass.Glass{Tint: c.Theme().Text.Alpha(0.07)}).Background(ui.Transparent).
 			Border(0, ui.Transparent).Label("搜索所有事件")
 	}, func() {
 		if len(a.boardItems) == 0 {

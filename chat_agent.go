@@ -12,120 +12,159 @@ import (
 	"stilday/agent"
 )
 
-func (a *app) startAgent() error {
-	if a.chat.client != nil {
-		return nil
-	}
-	if a.chat.dir == "" {
-		return errors.New("还没有工作目录")
-	}
+// agentStart is the resolved Pi runtime and extension, shared by every day
+// so a turn does not resolve them twice.
+type agentStart struct {
+	target piTarget
+	ext    string
+}
+
+// prepareAgent resolves what a Pi child needs before any day is touched.
+func (a *app) prepareAgent() (agentStart, error) {
 	target, err := a.piTarget()
 	if err != nil {
-		return err
+		return agentStart{}, err
 	}
 	ext, err := installExtension()
 	if err != nil {
+		return agentStart{}, err
+	}
+	return agentStart{target: target, ext: ext}, nil
+}
+
+func (a *app) startAgent(s *chatState) error {
+	if s.client != nil {
+		return nil
+	}
+	st, err := a.prepareAgent()
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(a.chat.dir, 0o755); err != nil {
+	return a.startAgentWith(s, st)
+}
+
+// startAgentWith starts one day's Pi child from a prepared runtime.
+func (a *app) startAgentWith(s *chatState, st agentStart) error {
+	if s.client != nil {
+		return nil
+	}
+	if s.dir == "" {
+		return errors.New("还没有工作目录")
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
-	sys := filepath.Join(a.chat.dir, "system.md")
-	if err := os.WriteFile(sys, []byte(a.systemPrompt()), 0o644); err != nil {
+	sys := filepath.Join(s.dir, "system.md")
+	if err := os.WriteFile(sys, []byte(a.systemPromptFor(s.day, s.dir, s.manifest)), 0o644); err != nil {
 		return err
 	}
-	env := append(append([]string{}, target.env...),
-		"STILDAY_DAY_DIR="+a.chat.dir,
+	env := append(append([]string{}, st.target.env...),
+		"STILDAY_DAY_DIR="+s.dir,
 		"STILDAY_DAY_LOG_SCHEMA="+dayLogSchemaJSON(),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	c, err := agent.Start(ctx, agent.Options{
-		Bin:          target.bin,
-		Dir:          a.chat.dir,
+		Bin:          st.target.bin,
+		Dir:          s.dir,
 		Env:          env,
-		SessionID:    "stilday-" + a.chat.day,
-		SessionDir:   filepath.Join(a.chat.dir, ".pi"),
-		Extension:    ext,
+		SessionID:    "stilday-" + s.day,
+		SessionDir:   filepath.Join(s.dir, ".pi"),
+		Extension:    st.ext,
 		SystemPrompt: sys,
-		Provider:     target.spec.ID,
-		Model:        target.model,
+		Provider:     st.target.spec.ID,
+		Model:        st.target.model,
 		Tools:        []string{"day_overview", "read", "stilday_save_day"},
 	})
 	if err != nil {
 		cancel()
 		return err
 	}
-	a.chat.ctx, a.chat.cancel, a.chat.client = ctx, cancel, c
-	a.chat.piErr = ""
-	go a.consumeAgent(c)
+	s.ctx, s.cancel, s.client = ctx, cancel, c
+	a.piErr = ""
+	go a.consumeAgent(s, c)
 	return nil
 }
 
-func (a *app) consumeAgent(c *agent.Client) {
+// claimTurn gives the one conversation slot to a day. The caller starts the
+// prompt on it.
+func (a *app) claimTurn(s *chatState, analysis bool) bool {
+	if s == nil || a.turn != nil || a.collecting {
+		return false
+	}
+	a.turn = s
+	s.analysis = analysis
+	return true
+}
+
+// onUI runs fn on the UI thread, or inline when there is no window (tests).
+func (a *app) onUI(fn func()) {
+	if a.win == nil {
+		fn()
+		return
+	}
+	a.win.Update(fn)
+}
+
+func (a *app) consumeAgent(s *chatState, c *agent.Client) {
 	for {
 		select {
 		case ev := <-c.Events():
-			if a.win == nil {
-				if a.chat.client == c {
-					a.handleAgentEvent(ev)
-				}
-				continue
-			}
-			a.win.Update(func() {
-				if a.chat.client != c {
+			a.onUI(func() {
+				if s.client != c {
 					return
 				}
-				a.handleAgentEvent(ev)
+				a.handleAgentEvent(s, ev)
 			})
 		case <-c.Done():
 			err := c.Err()
 			stderr := strings.TrimSpace(c.Stderr())
-			if a.win != nil {
-				a.win.Update(func() {
-					if a.chat.client != c {
-						return
+			a.onUI(func() {
+				if s.client != c {
+					return
+				}
+				s.client = nil
+				s.ctx = nil
+				s.cancel = nil
+				s.busy = false
+				a.finishStreaming(s)
+				if err != nil && s.err == "" {
+					msg := "Pi 退出：" + err.Error()
+					if stderr != "" {
+						msg += "\n" + stderr
 					}
-					a.chat.client = nil
-					a.chat.busy = false
-					a.finishStreaming()
-					if err != nil {
-						msg := "Pi 退出：" + err.Error()
-						if stderr != "" {
-							msg += "\n" + stderr
-						}
-						a.chat.err = msg
-					}
-				})
-			}
+					s.err = msg
+				}
+				a.settleTurn(s)
+			})
 			return
 		}
 	}
 }
 
-func (a *app) handleAgentEvent(ev agent.Event) {
+func (a *app) handleAgentEvent(s *chatState, ev agent.Event) {
 	switch ev.Type {
 	case "agent_start":
-		a.chat.busy = true
+		s.busy = true
 	case "message_start":
 		if ev.Message.Role == "assistant" {
-			a.finishStreaming()
-			m := &chatMessage{Role: "assistant", TS: time.Now(), ID: a.chat.nextID + 1}
-			a.chat.nextID++
-			a.chat.messages = append(a.chat.messages, m)
-			a.chat.streaming = m
+			a.finishStreaming(s)
+			m := &chatMessage{Role: "assistant", TS: time.Now(), ID: s.nextID + 1}
+			s.nextID++
+			s.messages = append(s.messages, m)
+			s.streaming = m
 		}
 	case "message_update":
-		if ev.Update.Type == "text_delta" && a.chat.streaming != nil {
-			a.chat.streaming.Text += ev.Update.Delta
+		if ev.Update.Type == "text_delta" && s.streaming != nil {
+			s.streaming.Text += ev.Update.Delta
 		}
 	case "message_end":
 		if ev.Message.Role == "assistant" {
-			if a.chat.streaming != nil {
-				a.chat.streaming.Text = ev.Message.Text()
-				a.finishStreaming()
+			if s.streaming != nil {
+				s.streaming.Text = ev.Message.Text()
+				a.finishStreaming(s)
 			}
 			if ev.Message.ErrorMessage != "" {
-				a.chat.err = ev.Message.ErrorMessage
+				s.err = ev.Message.ErrorMessage
 			}
 		}
 	case "tool_execution_start":
@@ -133,12 +172,12 @@ func (a *app) handleAgentEvent(ev agent.Event) {
 			Role: "tool", Tool: ev.ToolName, CallID: ev.ToolID,
 			ToolStatus: "running", TS: time.Now(),
 		}
-		a.chat.nextID++
-		m.ID = a.chat.nextID
-		a.chat.messages = append(a.chat.messages, m)
-		a.chat.byCall[ev.ToolID] = m
+		s.nextID++
+		m.ID = s.nextID
+		s.messages = append(s.messages, m)
+		s.byCall[ev.ToolID] = m
 	case "tool_execution_end":
-		m := a.chat.byCall[ev.ToolID]
+		m := s.byCall[ev.ToolID]
 		if m == nil {
 			return
 		}
@@ -149,69 +188,98 @@ func (a *app) handleAgentEvent(ev agent.Event) {
 		}
 		m.ToolDetail = toolDetail(ev)
 		if ev.ToolName == "stilday_save_day" && !ev.IsError {
-			if n := a.saveDayEntries(ev.Result.Details); n > 0 {
+			if n := a.saveDayEntriesFor(s.day, ev.Result.Details); n > 0 {
 				m.ToolDetail = fmt.Sprintf("保存 %d 条", n)
 			}
 		}
-		a.persistChat(m)
+		a.persistChat(s, m)
 	case "agent_settled":
-		a.chat.busy = false
-		a.finishStreaming()
-		a.finishAnalysisTurn()
+		s.busy = false
+		a.finishStreaming(s)
+		a.settleTurn(s)
 	case "auto_retry_start":
-		a.chat.progress = "模型重试中…"
+		s.progress = "模型重试中…"
 	case "auto_retry_end":
 		if !ev.Aborted {
-			a.chat.progress = ""
+			s.progress = ""
 		}
 	case "extension_error":
-		a.chat.err = "扩展：" + string(ev.Raw)
+		s.err = "扩展：" + string(ev.Raw)
 	}
 }
 
-func (a *app) finishStreaming() {
-	m := a.chat.streaming
+// settleTurn releases the slot when a turn ends, records the analysis
+// outcome, and lets a queued message run before the next analysis day.
+func (a *app) settleTurn(s *chatState) {
+	if s == nil || a.turn != s {
+		return
+	}
+	a.turn = nil
+	s.busy = false
+	s.greetingPending = false
+	if s.analysis {
+		s.analysis = false
+		if s.err == "" {
+			// The analysis consumed the material: record the fingerprints
+			// before the task is marked done. The task is still running, so
+			// the sync this triggers leaves it alone.
+			a.markAnalyzed(s.day)
+		}
+		a.finishAnalysisTask(s.day, s.err)
+	}
+	a.pumpConversation()
+}
+
+func (a *app) finishStreaming(s *chatState) {
+	m := s.streaming
 	if m == nil {
 		return
 	}
-	a.chat.streaming = nil
+	s.streaming = nil
 	if strings.TrimSpace(m.Text) == "" {
 		// A turn that only called tools has no text bubble.
-		a.removeMessage(m)
+		a.removeMessage(s, m)
 		return
 	}
 	m.Done = true
-	a.persistChat(m)
+	a.persistChat(s, m)
 }
 
-func (a *app) removeMessage(m *chatMessage) {
-	for i, x := range a.chat.messages {
+func (a *app) removeMessage(s *chatState, m *chatMessage) {
+	for i, x := range s.messages {
 		if x == m {
-			a.chat.messages = append(a.chat.messages[:i], a.chat.messages[i+1:]...)
+			s.messages = append(s.messages[:i], s.messages[i+1:]...)
 			return
 		}
 	}
 }
 
-func (a *app) stopAgent() {
-	if a.chat.client == nil {
+func (a *app) stopAgent(s *chatState) {
+	if s == nil || s.client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	c := s.client
 	go func() {
-		_ = a.chat.client.Abort(ctx)
+		_ = c.Abort(ctx)
 	}()
 }
 
-func (a *app) closeAgent() {
-	if a.chat.cancel != nil {
-		a.chat.cancel()
+func (a *app) closeAgent(s *chatState) {
+	if s == nil {
+		return
 	}
-	if a.chat.client != nil {
-		_ = a.chat.client.Close()
+	// Drop the handle first, so the consume goroutine's Done path ignores
+	// the close instead of settling a turn that is already released.
+	c, cancel := s.client, s.cancel
+	s.client = nil
+	s.ctx = nil
+	s.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
-	a.chat.client = nil
-	a.chat.ctx = nil
-	a.chat.cancel = nil
+	if c != nil {
+		_ = c.Close()
+	}
 }

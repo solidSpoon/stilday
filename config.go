@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo"
+
 	"stilday/internal/artifact"
 )
 
@@ -37,6 +39,19 @@ type config struct {
 	// Analysis waits until every collector for the target day is done.
 	CollectTime string `json:"collect_time"`
 	AutoTime    string `json:"auto_time"`
+	// AutoTimes are further analysis runs on the same day, after AutoTime.
+	AutoTimes []string `json:"auto_times,omitempty"`
+	// AutoDays limits the daily analysis to ISO weekdays (1 Monday to 7
+	// Sunday); empty means every day. AutoCustom says the days were picked
+	// by hand rather than the every-day or weekdays preset.
+	AutoDays   []int `json:"auto_days,omitempty"`
+	AutoCustom bool  `json:"auto_custom,omitempty"`
+	// AutoOff holds the daily analysis: the waiting days still queue, but
+	// start only when the user runs them by hand.
+	AutoOff bool `json:"auto_off,omitempty"`
+	// CatchUpMinutes is how late a scheduled job may still run after its
+	// time when the app starts; 0 means the default.
+	CatchUpMinutes int `json:"catch_up_minutes,omitempty"`
 	// MCPEnabled serves the query endpoint other assistants connect to,
 	// and MCPPort is the localhost port it listens on.
 	MCPEnabled bool   `json:"mcp_enabled"`
@@ -49,13 +64,14 @@ const defaultMaxPhotos = 120
 
 func defaultConfig() config {
 	return config{
-		PhotoStart:  "00:00",
-		PhotoEnd:    "23:59",
-		MaxPhotos:   defaultMaxPhotos,
-		Provider:    providers[0].ID,
-		Model:       providers[0].DefaultModel,
-		CollectTime: "22:00",
-		AutoTime:    "10:00",
+		PhotoStart:     "00:00",
+		PhotoEnd:       "23:59",
+		MaxPhotos:      defaultMaxPhotos,
+		Provider:       providers[0].ID,
+		Model:          providers[0].DefaultModel,
+		CollectTime:    "21:00",
+		AutoTime:       "22:00",
+		CatchUpMinutes: 60,
 	}
 }
 
@@ -108,17 +124,24 @@ func (c config) withDefaults() config {
 		// collection time, and the analysis moves to the next morning.
 		if c.AutoTime != "" && c.AutoTime != "10:00" {
 			c.CollectTime = c.AutoTime
+			c.AutoTime = "10:00"
 		} else {
-			c.CollectTime = "22:00"
+			c.CollectTime = "21:00"
 		}
 	}
 	c.CollectTime = normalizeClock(c.CollectTime)
+	if c.AutoTime == "" {
+		c.AutoTime = "22:00"
+	}
 	c.AutoTime = normalizeClock(c.AutoTime)
+	if c.CatchUpMinutes <= 0 {
+		c.CatchUpMinutes = 60
+	}
+	if c.CatchUpMinutes > 24*60 {
+		c.CatchUpMinutes = 24 * 60
+	}
 	if strings.TrimSpace(c.MCPPort) == "" {
 		c.MCPPort = mcpDefaultPort
-	}
-	if c.AutoTime == "" || c.AutoTime == c.CollectTime {
-		c.AutoTime = "10:00"
 	}
 	return c
 }
@@ -163,10 +186,20 @@ func dataDir() string {
 	if dir := os.Getenv("STILDAY_HOME"); dir != "" {
 		return dir
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".stilday")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".stilday"
 	}
-	return ".stilday"
+	if devApp() {
+		return filepath.Join(home, ".stilday-dev")
+	}
+	return filepath.Join(home, ".stilday")
+}
+
+// devApp reports whether this is the dev bundle: it has its own settings
+// and suggested storage, so development never touches the real day.
+func devApp() bool {
+	return mygo.App.Name() == "Stilday Dev"
 }
 
 // expandPath turns ~ and ~/ into the home directory.
@@ -280,10 +313,14 @@ func detectPhotosLibrary() string {
 
 // suggestStorageDir is the default the first run offers.
 func suggestStorageDir() string {
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, "Stilday")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "Stilday"
 	}
-	return "Stilday"
+	if devApp() {
+		return filepath.Join(home, "Stilday-dev")
+	}
+	return filepath.Join(home, "Stilday")
 }
 
 func shortenPath(p string) string {

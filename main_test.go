@@ -22,7 +22,9 @@ func newTestApp(t *testing.T) *app {
 	t.Setenv("STILDAY_PHOTOS_LIBRARY", t.TempDir())
 	mygo.App.SetPath(mygo.PathAppData, t.TempDir())
 	t.Cleanup(func() { mygo.App.SetPath(mygo.PathAppData, "") })
-	return newApp()
+	a := newApp()
+	t.Cleanup(a.closeAllAgents)
+	return a
 }
 
 // configureTestApp gives the app a temporary storage root and opens today.
@@ -40,12 +42,18 @@ func configureTestApp(t *testing.T, a *app) string {
 	a.store = artifact.Open(a.cfg.artifactsRoot())
 	a.page = "day"
 	a.day = midnight(time.Now())
-	a.chat.piPath = "/usr/local/bin/pi"
-	a.chat.piErr = ""
+	a.piPath = "/usr/local/bin/pi"
+	a.piErr = ""
 	a.loadCollectorSettings()
+	// Unit tests drive the pages and the clock themselves: a real 22:00
+	// photo run would rewrite the day (and its manifest) under them.
+	if p := a.photosPlugin(); p != nil {
+		p.value.Schedule.Enabled = false
+	}
 	a.resetForDay()
 	a.loadEntries()
 	a.reloadCalendar()
+	a.openDay(a.day)
 	a.boardDirty = true
 	return root
 }
@@ -268,7 +276,7 @@ func TestAnalysisStartsFreshSession(t *testing.T) {
 	}
 	a.chat.messages = []*chatMessage{{ID: 1, Role: "user", Text: "旧对话"}}
 	a.chat.nextID = 1
-	a.beginAnalysisSession()
+	a.beginAnalysisSession(a.chat)
 	if len(a.chat.messages) != 0 || len(a.entries) != 0 {
 		t.Errorf("session not cleared: %d chat rows, %d entries", len(a.chat.messages), len(a.entries))
 	}
@@ -318,9 +326,9 @@ func TestPhotoPreview(t *testing.T) {
 	a.chat.day = a.day.Format("2006-01-02")
 	a.chat.dir = dir
 	a.chat.manifest = m
-	a.chat.sheets = a.decodeSheets(m)
-	a.chat.thumbs = a.decodeThumbs(m)
-	a.chat.piPath = "/usr/local/bin/pi"
+	a.chat.sheets = a.decodeSheets(a.chat, m)
+	a.chat.thumbs = a.decodeThumbs(a.chat, m)
+	a.piPath = "/usr/local/bin/pi"
 
 	tt := ui.NewTester(a.view, 1400, 900)
 	tt.Frame()
@@ -447,7 +455,7 @@ func TestOpeningADayLeavesNoFolder(t *testing.T) {
 		t.Fatal("opening an empty day marked it as having data")
 	}
 	// A message creates the folder, and only then.
-	a.addMessage(&chatMessage{Role: "user", Text: "记一笔"})
+	a.addMessage(a.chat, &chatMessage{Role: "user", Text: "记一笔"})
 	if _, err := os.Stat(filepath.Join(a.cfg.workDayDir(empty), "chat.jsonl")); err != nil {
 		t.Fatal("a saved message did not create the day's transcript:", err)
 	}
@@ -456,5 +464,28 @@ func TestOpeningADayLeavesNoFolder(t *testing.T) {
 	a.addEntry(artifact.Entry{OccurredAt: time.Now(), Kind: "observation", Summary: "记一笔"})
 	if !a.dataDays[dayKey(a.day)] {
 		t.Fatal("a saved entry did not mark its day")
+	}
+}
+
+// The daily analysis runs without selecting its day: the page and the
+// selected day stay where the user left them.
+func TestAnalysisDoesNotSwitchThePage(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	other := a.day.AddDate(0, 0, -1)
+	a.day = midnight(other)
+	a.page = pageBoard
+	a.openDay(other)
+	page, day := a.page, a.day
+	a.cfg.Provider = "no-such-provider" // fail fast, before any Pi starts
+	a.startAnalysisDay(dayKey(day))
+	if a.page != page || !a.day.Equal(day) {
+		t.Fatalf("analysis moved the view: page=%v day=%v", a.page, a.day)
+	}
+	if a.turn != nil {
+		t.Fatal("an analysis started without Pi and a provider key")
+	}
+	if len(a.entries) != 0 {
+		t.Fatalf("a failed analysis still wrote entries: %+v", a.entries)
 	}
 }

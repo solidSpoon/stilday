@@ -20,19 +20,22 @@ type chatRecord struct {
 	Images int    `json:"images,omitempty"`
 }
 
-// addMessage appends a message and persists it.
-func (a *app) addMessage(m *chatMessage) {
-	a.chat.nextID++
-	m.ID = a.chat.nextID
+// addMessage appends a message to a day's conversation and persists it.
+func (a *app) addMessage(s *chatState, m *chatMessage) {
+	if s == nil {
+		return
+	}
+	s.nextID++
+	m.ID = s.nextID
 	if m.TS.IsZero() {
 		m.TS = time.Now()
 	}
-	a.chat.messages = append(a.chat.messages, m)
-	a.persistChat(m)
+	s.messages = append(s.messages, m)
+	a.persistChat(s, m)
 }
 
-func (a *app) persistChat(m *chatMessage) {
-	if a.chat.dir == "" || (m.Role == "assistant" && strings.TrimSpace(m.Text) == "") {
+func (a *app) persistChat(s *chatState, m *chatMessage) {
+	if s == nil || s.dir == "" || (m.Role == "assistant" && strings.TrimSpace(m.Text) == "") {
 		return
 	}
 	r := chatRecord{
@@ -48,10 +51,10 @@ func (a *app) persistChat(m *chatMessage) {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(a.chat.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(a.chat.dir, "chat.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(filepath.Join(s.dir, "chat.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
 	}

@@ -41,6 +41,7 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnQuit(func() {
 		a.mcp.stop()
+		a.closeAllAgents()
 		close(a.stopped)
 	})
 	mygo.App.WhenReady(func() {

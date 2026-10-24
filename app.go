@@ -6,13 +6,21 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
-	"stilday/internal/analysis"
 	"stilday/internal/artifact"
+	"stilday/internal/schedule"
 )
 
+// pendingTurn is one user message waiting for the one Pi turn slot. The
+// message is already in its conversation; only the prompt is waiting.
+type pendingTurn struct {
+	state  *chatState
+	text   string
+	images int
+}
+
 // app is the window and the state every page reads: the selected day, its
-// entries, the calendar and board caches, and the three long-lived
-// machines — the chat, the collector runs and the analysis queue.
+// entries, the calendar and board caches, and the long-lived machines — the
+// days' chats, the collector runs and the analysis scheduler.
 type app struct {
 	win *mygo.Window
 
@@ -45,7 +53,20 @@ type app struct {
 	boardDirty   bool
 	boardList    ui.ListState
 
-	chat   chatState
+	// chats holds every day's conversation this session has opened or
+	// analyzed, keyed by YYYY-MM-DD. chat points at the selected day's
+	// state; the page always renders that one. A day's agent keeps running
+	// while another day is selected.
+	chats map[string]*chatState
+	chat  *chatState
+	// turn is the conversation holding the one Pi turn slot, whether a
+	// user's message or the day's analysis. pending holds user messages
+	// accepted while the slot was busy; they run before the next analysis.
+	turn    *chatState
+	pending []pendingTurn
+
+	piPath string
+	piErr  string
 	pi     piState
 	photos photoView
 
@@ -58,6 +79,8 @@ type app struct {
 	settingsDraft   config
 	settingsErr     string
 	keyDraft        string
+	catchUpDraft    string
+	collectStarted  time.Time
 	keySaved        bool
 	keySaveTimer    *time.Timer
 	modelPickerOpen bool
@@ -79,11 +102,11 @@ type app struct {
 	collectID              string
 	collectProgress        string
 	collectQueue           []string
-	autoAnalyzeDay         string
 
-	// The background analysis: which day is running, what waits behind it,
-	// and what the user cancelled.
-	analysis analysis.Queue
+	// The daily scheduler owns the per-day analysis tasks and the storage
+	// its records belong to.
+	sched     *schedule.Scheduler
+	schedRoot string
 
 	copiedUntil time.Time
 	fileErr     error
@@ -120,6 +143,7 @@ func newApp() *app {
 		chatWidth:       defaultChatWidth,
 		materialsShare:  defaultMaterialsShare,
 		sidebarWide:     true,
+		chats:           map[string]*chatState{},
 		collectorList:   defaultCollectors(),
 		collectorDay:    collectorDay{Items: map[string]collectorRun{}},
 		stopped:         make(chan struct{}),
@@ -128,15 +152,14 @@ func newApp() *app {
 	a.store = artifact.Open(a.cfg.artifactsRoot())
 	if a.cfg.configured() {
 		a.loadCollectorSettings()
+		a.pruneContentlessDays()
 		go cleanupLegacyPhotoOriginals(a.cfg.workRoot())
 	}
-	a.chat = chatState{
-		byCall: map[string]*chatMessage{},
-	}
+	a.chat = newChatState()
 	a.resetPhotos()
 	a.pi = piState{version: piVersion, path: installedPiBinary()}
 	a.pi.installed = a.pi.path != ""
-	a.chat.piPath, a.chat.piErr = resolvePi()
+	a.piPath, a.piErr = resolvePi()
 	if !a.cfg.configured() {
 		a.page = pageSettings
 		a.settingsDraft = a.cfg
@@ -144,8 +167,8 @@ func newApp() *app {
 	} else {
 		a.loadEntries()
 	}
-	a.wireAnalysis()
 	a.reloadCalendar()
+	a.syncAnalysisTasks()
 	return a
 }
 
@@ -200,57 +223,69 @@ func (a *app) view(c *ui.Context) {
 // nothing.
 func (a *app) tick() {
 	a.flushCollectorPage()
-	a.maybeAutoCollect()
-	a.maybeAutoAnalyze()
+	if s := a.scheduler(); s != nil {
+		s.Tick()
+	}
 }
 
 // The conversation has one turn slot: a Pi turn, the opening line, the
-// photo preparation and a collector run all write the same chat state
-// (busy, preparing, progress). These two predicates are the one place the
-// entry points ask whether that slot is free, so a manual action, a
-// collector and a scheduled task can never claim it twice.
+// photo preparation and a collector run all write chat state (busy,
+// preparing, progress). These predicates are the one place the entry
+// points ask whether that slot is free, so a manual action, a collector and
+// a scheduled task can never claim it twice.
 
 // chatIdle reports whether the conversation slot is free.
 func (a *app) chatIdle() bool {
-	return !a.chat.busy && !a.chat.preparing && !a.chat.greetingPending && !a.collecting
+	if a.collecting || a.turn != nil {
+		return false
+	}
+	if a.chat != nil && a.chat.preparing {
+		return false
+	}
+	for _, s := range a.chats {
+		if s.preparing {
+			return false
+		}
+	}
+	return true
 }
 
 // canStartWork reports whether a fresh analysis or collector run may begin.
-// The analysis queue starts its own days through startAnalysis, so that
-// path asks chatIdle instead: it is allowed to run while the queue itself
-// is the owner.
 func (a *app) canStartWork() bool {
-	return a.chatIdle() && !a.analysis.Running
+	return a.chatIdle()
 }
 
-// canStartAnalysis reports whether a batch start can run now: there is a day
-// to start, and either the queue already owns the conversation slot or it is
-// free.
+// canStartAnalysis reports whether the rail's start action has a waiting
+// day. Making a task due is safe while another turn runs: it starts when
+// the slot frees.
 func (a *app) canStartAnalysis() bool {
-	return a.analysis.CanStart() && (a.analysis.Running || a.chatIdle())
+	s := a.scheduler()
+	return s != nil && s.CanStart()
 }
 
 // canStartCollector reports whether a collector run can take the slot: it is
-// idle, or only the analysis queue is using it, which a run stops.
+// idle, or only an analysis is using it, which a run stops.
 func (a *app) canStartCollector() bool {
-	return !a.collecting && (a.chatIdle() || a.analysis.Running)
+	return !a.collecting && (a.chatIdle() || a.analysisRunningDay() != "")
 }
 
-// takeConversationSlot stops the analysis queue, whose material a collector
-// run is about to change, and reports whether the run may start. A manual
-// conversation keeps the slot.
+// takeConversationSlot stops the running analysis, whose material a
+// collector run is about to change, and reports whether the run may start.
+// A manual conversation keeps the slot.
 func (a *app) takeConversationSlot() bool {
 	if a.collecting {
 		return false
 	}
-	if a.analysis.Running {
-		a.analysis.StopRun()
+	if day := a.analysisRunningDay(); day != "" {
+		a.interruptAnalysis(day)
 		return true
 	}
 	return a.chatIdle()
 }
 
-// selectDay switches the whole app to another day.
+// selectDay switches the whole app to another day. Days keep their
+// conversations and their agents: switching away from a busy day does not
+// stop it.
 func (a *app) selectDay(day time.Time) {
 	if !a.cfg.configured() {
 		a.openSettings()
@@ -263,7 +298,8 @@ func (a *app) selectDay(day time.Time) {
 	a.calYear = day.Year()
 	a.rebuildCalendarRows()
 	a.loadEntries()
-	a.resetForDay()
+	a.resetPhotos()
+	a.openDay(day)
 }
 
 // loadEntries reads the selected day's artifact.
@@ -289,6 +325,22 @@ func (a *app) addEntry(e Entry) {
 	}
 	a.entries = append(a.entries, e)
 	a.dataDays[dayKey(a.day)] = true
+	a.boardDirty = true
+	if err := a.store.Append(e); err != nil {
+		a.fileErr = err
+	}
+}
+
+// appendEntry writes an event to a day that is not the selected one,
+// without touching the selected day's in-memory timeline.
+func (a *app) appendEntry(e Entry) {
+	if e.Day == "" {
+		return
+	}
+	if e.UpdatedAt.IsZero() {
+		e.UpdatedAt = time.Now()
+	}
+	a.dataDays[e.Day] = true
 	a.boardDirty = true
 	if err := a.store.Append(e); err != nil {
 		a.fileErr = err

@@ -10,17 +10,23 @@ import (
 )
 
 func (a *app) systemPrompt() string {
+	return a.systemPromptFor(a.chat.day, a.chat.dir, a.chat.manifest)
+}
+
+// systemPromptFor builds the prompt for a day's files, whether the day is
+// on screen or analyzed in the background.
+func (a *app) systemPromptFor(day, dir string, m *manifest) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(promptBase()))
 	b.WriteString("\n\n")
-	fmt.Fprintf(&b, "今天是 %s。\n", a.chat.day)
-	fmt.Fprintf(&b, "当天的文件夹是 %s。\n\n", a.chat.dir)
+	fmt.Fprintf(&b, "今天是 %s。\n", day)
+	fmt.Fprintf(&b, "当天的文件夹是 %s。\n\n", dir)
 	b.WriteString("采集器（按执行顺序）：\n")
 	for _, p := range a.collectorList {
 		fmt.Fprintf(&b, "- %s（%s），文件夹 %s/：%s\n", p.ID(), p.Name(), p.Folder(), p.Description())
 	}
 	b.WriteString("每个采集器把原始材料放在自己的文件夹里；manifest.json 列出每个采集器及其文件夹。照片采集器把 1600px JPEG 写入 previews/，界面用的小 JPEG 写入 thumbs/，编号合集写入 sheets/；不保留原图。\n")
-	if m := a.chat.manifest; m != nil && len(m.Photos) > 0 {
+	if m != nil && len(m.Photos) > 0 {
 		fmt.Fprintf(&b, "当天有 %d 张编号照片，分布在 %d 张合集里。合集已附在当天的第一条消息里；需要再看时可以调用 day_overview。\n", len(m.Photos), len(m.Sheets))
 	} else {
 		b.WriteString("今天还没有照片；先根据对话回答，如果需要照片就说明。\n")
@@ -39,6 +45,12 @@ type dayLogEntry struct {
 // complete list: it replaces the day's entries, so a later chat can fix the
 // log by sending the whole list again.
 func (a *app) saveDayEntries(details json.RawMessage) int {
+	return a.saveDayEntriesFor(a.chat.day, details)
+}
+
+// saveDayEntriesFor applies a stilday_save_day call to a day's log,
+// whether that day is on screen or analyzed in the background.
+func (a *app) saveDayEntriesFor(key string, details json.RawMessage) int {
 	if len(details) == 0 {
 		return 0
 	}
@@ -46,12 +58,10 @@ func (a *app) saveDayEntries(details json.RawMessage) int {
 		Entries []dayLogEntry `json:"entries"`
 	}
 	if err := json.Unmarshal(details, &payload); err != nil {
-		a.chat.err = "stilday_save_day: " + err.Error()
 		return 0
 	}
-	day, err := time.Parse("2006-01-02", a.chat.day)
+	day, err := time.Parse("2006-01-02", key)
 	if err != nil {
-		a.chat.err = "stilday_save_day: " + err.Error()
 		return 0
 	}
 	entries := make([]Entry, 0, len(payload.Entries))
@@ -72,22 +82,33 @@ func (a *app) saveDayEntries(details json.RawMessage) int {
 		if !ok {
 			ts = time.Now()
 		}
-		entries = append(entries, Entry{OccurredAt: ts, Day: a.chat.day, Kind: kind, Summary: summary})
+		entries = append(entries, Entry{OccurredAt: ts, Day: key, Kind: kind, Summary: summary})
 	}
 	if len(entries) == 0 {
 		// An empty list would wipe the day; keep what is there.
 		return 0
 	}
 	if err := a.store.ClearDay(day); err != nil {
-		a.chat.err = "stilday_save_day: " + err.Error()
 		return 0
 	}
-	a.entries = nil
-	a.seq = 0
-	a.outputFocus = 0
-	for _, e := range entries {
-		a.addEntry(e)
+	selected := sameDay(day, a.day)
+	if selected {
+		// The page shows this day: replace its in-memory timeline too, so
+		// the events appear as the model writes them.
+		a.entries = nil
+		a.seq = 0
+		a.outputFocus = 0
+		for _, e := range entries {
+			a.addEntry(e)
+		}
+	} else {
+		// Another day: write it to the year file without touching the
+		// selected day's timeline.
+		for _, e := range entries {
+			a.appendEntry(e)
+		}
 	}
+	a.dataDays[key] = true
 	a.boardDirty = true
 	return len(entries)
 }

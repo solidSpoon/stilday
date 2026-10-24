@@ -111,9 +111,12 @@ func (a *app) keepScheduleTicking() {
 					return
 				}
 				a.win.Update(func() {
+					// No frame updates the clock while the window is
+					// hidden; the schedule still follows the wall clock.
+					a.now = time.Now()
 					// A hidden app has no day open: open it here, as the
 					// day page would, so its collectors can run.
-					if a.cfg.configured() && !a.chat.loaded {
+					if a.cfg.configured() && (a.chat == nil || !a.chat.loaded) {
 						a.openDay(a.day)
 					}
 					a.tick()

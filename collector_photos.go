@@ -33,7 +33,7 @@ func newPhotosCollector() *photosCollector {
 		fileSettings: newFileSettings(photosCollectorID, photosSettings{
 			Days:        1,
 			KeepRemoved: true,
-			Schedule:    collectorSchedule{Enabled: true, Time: "22:00"},
+			Schedule:    collectorSchedule{Enabled: true, Time: "21:00"},
 		}),
 		folderFingerprint: folderFingerprint{id: photosCollectorID},
 	}
@@ -134,17 +134,17 @@ func (p *photosCollector) View(c *ui.Context, view collectorView) {
 // days rather than only the open day. Photos is the only such plugin: its
 // source is a library, not a folder belonging to one day. It reports
 // whether it handled the collector.
-func (a *app) syncRangeCollector(id string, auto bool) bool {
+func (a *app) syncRangeCollector(id string) bool {
 	if id != photosCollectorID {
 		return false
 	}
-	a.syncRecentPhotoDays(auto)
+	a.syncRecentPhotoDays()
 	return true
 }
 
 // runCollectorNow is the "run now" action of one plugin.
 func (a *app) runCollectorNow(id string) {
-	if a.syncRangeCollector(id, false) {
+	if a.syncRangeCollector(id) {
 		return
 	}
 	a.startCollectorID(id)
@@ -153,7 +153,7 @@ func (a *app) runCollectorNow(id string) {
 // syncRecentPhotoDays syncs the photo collector over the configured recent
 // days. Only disk work and the plugin run happen off the UI thread; the
 // state the views read is published in one step at the end.
-func (a *app) syncRecentPhotoDays(auto bool) {
+func (a *app) syncRecentPhotoDays() {
 	if !a.cfg.configured() || !a.takeConversationSlot() {
 		return
 	}
@@ -173,7 +173,9 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 	selectedDir := a.chat.dir
 	a.beginCollection(photosCollectorID, "准备同步…")
 
-	sync := func() {
+	// work is only disk and CPU; it returns what the UI-thread publish
+	// needs. The worker never touches the app's state.
+	work := func() (collectorDay, error) {
 		var selected collectorDay
 		var saveErr error
 		for i := 0; i < days; i++ {
@@ -183,15 +185,8 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 			run := state.Items[p.ID()]
 			run.Status = "running"
 			run.StartedAt = time.Now().Format(time.RFC3339)
-			if auto {
-				run.AutoAt = now.Format(time.RFC3339)
-			}
 			run.FinishedAt = ""
 			run.Error = ""
-			state.Items[p.ID()] = run
-			if err := saveCollectorDay(dir, state); err != nil {
-				saveErr = err
-			}
 
 			// The plugin's generated material is replaced, not merged,
 			// unless the day keeps what it has: then only the derived
@@ -219,39 +214,47 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 			} else {
 				run.recordFingerprint(p.Fingerprint(env))
 			}
-			state.Items[p.ID()] = run
-			if err := saveCollectorDay(dir, state); err != nil {
-				saveErr = err
+			if dayHasContent(dir) {
+				state.Items[p.ID()] = run
+				if err := saveCollectorDay(dir, state); err != nil {
+					saveErr = err
+				}
+				syncDayManifest(dir, day, state, collectors)
+			} else {
+				// The day collected nothing: leave no folder behind.
+				_ = os.RemoveAll(dir)
+				delete(state.Items, p.ID())
 			}
-			syncDayManifest(dir, day, state, collectors)
 			if dir == selectedDir {
 				selected = state
 			}
 		}
-		// The scan only marks what changed: refreshChangedDays publishes
-		// the pending days the task rail lists. It does not touch the
-		// analysis queue, which may be running.
-		publish := func() {
-			a.finishCollection()
-			if saveErr != nil {
-				a.chat.err = "保存采集状态：" + saveErr.Error()
-			}
-			if selectedDir != "" && selectedDir == a.chat.dir {
-				a.collectorDay = selected
-				a.reloadMaterials(selectedDir)
-			}
-			if auto {
-				a.markAutoDay(today)
-			}
-			a.reloadCalendar()
+		return selected, saveErr
+	}
+	publish := func(selected collectorDay, saveErr error) {
+		a.finishCollection()
+		if saveErr != nil {
+			a.chat.err = "保存采集状态：" + saveErr.Error()
 		}
-		publish()
+		if selectedDir != "" && selectedDir == a.chat.dir {
+			a.collectorDay = selected
+			a.reloadMaterials(selectedDir)
+		}
+		// Republish the changed days as scheduler tasks, and only then let
+		// a waiting conversation or analysis use the freed slot.
+		a.reloadCalendar()
+		a.syncAnalysisTasks()
+		a.pumpConversation()
 	}
 	if a.win == nil {
 		// No window (tests): run inline so the result is immediately
 		// observable and no worker mutates app state behind the caller.
-		sync()
+		selected, saveErr := work()
+		publish(selected, saveErr)
 		return
 	}
-	go sync()
+	go func() {
+		selected, saveErr := work()
+		a.win.Update(func() { publish(selected, saveErr) })
+	}()
 }

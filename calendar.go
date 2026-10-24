@@ -54,17 +54,21 @@ func scanWorkDays(root string, fn func(key, dir string)) {
 
 func (a *app) scanRawDays(root string, out map[string]bool) {
 	scanWorkDays(root, func(key, dir string) {
-		if dayHasCollectorFiles(a.collectorList, dir) {
-			out[key] = true
+		// A plugin's fingerprint is its own answer to "did I collect
+		// anything this day": the folder hash is empty when nothing is
+		// there, so one state read per day answers for every plugin.
+		state := loadCollectorDay(dir)
+		for _, p := range a.collectorList {
+			if state.Items[p.ID()].Fingerprint != "" {
+				out[key] = true
+				return
+			}
 		}
 	})
 }
 
 func (a *app) scanChangedDays(root string, out map[string]bool) {
 	scanWorkDays(root, func(key, dir string) {
-		if !dayHasCollectorFiles(a.collectorList, dir) {
-			return
-		}
 		state := loadCollectorDay(dir)
 		for _, p := range a.collectorList {
 			if state.Items[p.ID()].pendingAnalysis() {
@@ -82,6 +86,7 @@ func (a *app) refreshChangedDays() {
 	if a.cfg.configured() {
 		a.scanChangedDays(a.cfg.workRoot(), a.calendarChanged)
 	}
+	a.syncAnalysisTasks()
 }
 
 // calendarStartYear is the oldest year the sidebar shows. Past years are

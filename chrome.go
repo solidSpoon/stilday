@@ -133,6 +133,9 @@ func glassAction(c *ui.Context, icon *ui.SVG, label string, enabled bool, tint u
 	if tint.A > 0 {
 		g.Tint = tint
 		fg = t.AccentText
+	} else {
+		// A light fill, so the circle reads without an outline.
+		g.Tint = t.Text.Alpha(0.07)
 	}
 	b := ui.Box(c).Size(32, 32).Radius(16).Center().Material(g).
 		Label(label).Tooltip(label)

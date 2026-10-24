@@ -84,6 +84,12 @@ type collectorView struct {
 type collectorSchedule struct {
 	Enabled bool   `json:"enabled"`
 	Time    string `json:"time,omitempty"` // HH:MM
+	// Days limits the run to ISO weekdays; empty means every day.
+	Days []int `json:"days,omitempty"`
+	// Times are further runs on the same day, after Time.
+	Times []string `json:"times,omitempty"`
+	// Custom says the days were picked by hand, not the weekdays preset.
+	Custom bool `json:"custom,omitempty"`
 }
 
 // pluginDir is the folder a plugin owns under the storage root: its
@@ -219,7 +225,6 @@ func migrateLegacySettings(root string, plugins []collector) {
 type collectorRun struct {
 	Status              string `json:"status"` // running, done, error
 	StartedAt           string `json:"started_at,omitempty"`
-	AutoAt              string `json:"auto_at,omitempty"`
 	FinishedAt          string `json:"finished_at,omitempty"`
 	Error               string `json:"error,omitempty"`
 	Fingerprint         string `json:"fingerprint,omitempty"`
@@ -245,9 +250,8 @@ func (r *collectorRun) recordFingerprint(fp string) {
 
 // collectorDay is the day's collector state, kept beside the materials.
 type collectorDay struct {
-	Day    string                  `json:"day"`
-	AutoAt string                  `json:"auto_at,omitempty"`
-	Items  map[string]collectorRun `json:"items,omitempty"`
+	Day   string                  `json:"day"`
+	Items map[string]collectorRun `json:"items,omitempty"`
 }
 
 // collectorRecord is the public metadata of one collector in manifest.json.
@@ -357,6 +361,39 @@ func fingerprintFolder(dayDir, folder, id, seed string) (string, error) {
 // collectorStatePath is the per-day collector state file.
 func collectorStatePath(dayDir string) string {
 	return filepath.Join(dayDir, "collectors.json")
+}
+
+// dayHasContent reports whether a day folder holds anything besides the
+// collector state the app keeps beside the material: a folder that only
+// has collectors.json/manifest.json, or empty subfolders, is not content.
+func dayHasContent(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "collectors.json", "manifest.json":
+			continue
+		}
+		if !e.IsDir() {
+			return true
+		}
+		if sub, err := os.ReadDir(filepath.Join(dir, e.Name())); err == nil && len(sub) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneContentlessDays removes day folders that only hold collector state:
+// a work folder means the day has material.
+func (a *app) pruneContentlessDays() {
+	scanWorkDays(a.cfg.workRoot(), func(key, dir string) {
+		if !dayHasContent(dir) {
+			_ = os.RemoveAll(dir)
+		}
+	})
 }
 
 func loadCollectorDay(dayDir string) collectorDay {

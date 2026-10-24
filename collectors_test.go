@@ -9,7 +9,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
-	"stilday/internal/analysis"
+	"stilday/internal/schedule"
 )
 
 type fakeCollector struct {
@@ -129,25 +129,28 @@ func TestAutoCollectRunsOncePerDay(t *testing.T) {
 	t.Setenv("STILDAY_PHOTOS_LIBRARY", src)
 	makePhoto(t, filepath.Join(src, "a.jpg"), color.RGBA{200, 40, 40, 255})
 	a.openDay(a.day)
+	// This test is about scheduled collection: turn the daily run back on
+	// (the test setup keeps it off so the clock cannot move the pages).
+	a.photosPlugin().value.Schedule = collectorSchedule{Enabled: true, Time: "22:00"}
 	a.cfg.CollectTime = "22:00"
 	a.now = time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 22, 1, 0, 0, time.Local)
 	a.page = "day"
 	// The scheduled scan waits while a conversation owns the slot.
 	a.chat.busy = true
-	a.maybeAutoCollect()
+	a.scheduler().Tick()
 	if a.collecting {
 		t.Fatal("auto collect started during a conversation")
 	}
 	a.chat.busy = false
-	a.maybeAutoCollect()
+	a.scheduler().Tick()
 	waitCollecting(t, a)
 	if run := a.collectorDay.Items["photos"]; run.Status != "done" {
 		t.Fatalf("auto photos status is %+v", run)
 	}
-	if a.collectorDay.AutoAt == "" {
-		t.Error("auto_at was not recorded")
+	if _, ok := a.scheduler().Last(collectorJob(photosCollectorID)); !ok {
+		t.Error("the auto run was not recorded")
 	}
-	a.maybeAutoCollect()
+	a.scheduler().Tick()
 	time.Sleep(50 * time.Millisecond)
 	if a.collecting {
 		t.Error("auto collect ran twice")
@@ -157,18 +160,21 @@ func TestAutoCollectRunsOncePerDay(t *testing.T) {
 // The daily batch start is independent of the collectors: it starts the days
 // the scan marked as changed, even when the collector's last run has not
 // settled.
-func TestAutoAnalyzeStartsMarkedDaysWithoutSettledCollectors(t *testing.T) {
+// A day whose collector material changed becomes one scheduler task,
+// waiting for the next daily analysis time. A busy conversation does not
+// consume that task; it stays pending until the slot frees.
+func TestAnalysisTasksFollowChangedDays(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	day := a.day
-	a.openDay(day)
-	dir := a.chat.dir
-	if err := os.MkdirAll(filepath.Join(dir, "previews"), 0o755); err != nil {
-		t.Fatal(err)
+	a.now = time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, time.Local)
+	a.cfg.AutoTime = "10:00"
+	a.refreshChangedDays()
+	if tasks := a.scheduler().Tasks(); len(tasks) != 0 {
+		t.Fatalf("tasks without changed days: %+v", tasks)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "previews", "001.jpg"), []byte("raw"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+
+	dir := a.cfg.workDayDir(day)
 	state := loadCollectorDay(dir)
 	state.Items = map[string]collectorRun{
 		"photos": {Status: "running", Fingerprint: "sha256:new"},
@@ -177,47 +183,58 @@ func TestAutoAnalyzeStartsMarkedDaysWithoutSettledCollectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.refreshChangedDays()
-
-	var started []string
-	a.analysis = analysis.New(analysis.Hooks{
-		Pending:  a.changedDaysSorted,
-		StartDay: func(key string) bool { started = append(started, key); return true },
-	})
-	a.cfg.AutoTime = "10:00"
-	a.now = time.Date(day.Year(), day.Month(), day.Day(), 10, 1, 0, 0, time.Local)
-	a.page = pageDay
-	// While a conversation owns the slot the batch start waits, and it
-	// does not consume the day's time.
-	a.chat.busy = true
-	a.maybeAutoAnalyze()
-	if len(started) != 0 || a.autoAnalyzeDay != "" {
-		t.Fatalf("started during a conversation: %v %q", started, a.autoAnalyzeDay)
+	id := schedule.AnalysisID(dayKey(day))
+	task, ok := a.scheduler().Task(id)
+	if !ok || task.State != schedule.TaskPending {
+		t.Fatalf("the changed day has no pending task: %+v", task)
 	}
-	a.chat.busy = false
-	a.maybeAutoAnalyze()
-	if len(started) != 1 || started[0] != dayKey(day) {
-		t.Fatalf("started days are %v", started)
+	// A task the collectors produced has no start time yet: the daily
+	// analysis job gives it one when it releases the day.
+	if !task.Due.IsZero() {
+		t.Fatalf("a produced task should be unscheduled, due %v", task.Due)
+	}
+
+	// While a conversation owns the slot the task waits, and it does not
+	// consume the day's time.
+	a.turn = a.chat
+	a.now = a.now.Add(time.Hour + time.Minute)
+	a.scheduler().Tick()
+	if got, _ := a.scheduler().Task(id); got.State != schedule.TaskPending {
+		t.Fatalf("the task ran during a conversation: %+v", got)
+	}
+	a.turn = nil
+
+	// No Pi: the run cannot start, so the task is marked failed and left
+	// for the rail's retry action.
+	a.piPath = filepath.Join(t.TempDir(), "no-pi")
+	a.piErr = ""
+	a.scheduler().Tick()
+	if got, _ := a.scheduler().Task(id); got.State != schedule.TaskFailed {
+		t.Fatalf("a task that could not start is %+v", got)
+	}
+	if a.turn != nil {
+		t.Fatal("a failed start kept the conversation slot")
 	}
 }
 
-// With nothing marked, the daily batch start leaves the app alone.
+// With nothing marked, the scheduler has no analysis task at all.
 func TestAutoAnalyzeDoesNothingWithoutPendingDays(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	a.cfg.AutoTime = "10:00"
 	a.now = time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 10, 1, 0, 0, time.Local)
 	a.page = pageDay
-	a.maybeAutoAnalyze()
-	if a.analysis.Running || len(a.analysis.Queue) != 0 {
-		t.Fatalf("started with nothing pending: running=%v queue=%v", a.analysis.Running, a.analysis.Queue)
+	a.scheduler().Tick()
+	if tasks := a.scheduler().Tasks(); len(tasks) != 0 {
+		t.Fatalf("tasks with nothing pending: %+v", tasks)
 	}
-	if a.autoAnalyzeDay != dayKey(a.day) {
-		t.Fatalf("the daily slot was not settled: %q", a.autoAnalyzeDay)
+	if a.turn != nil {
+		t.Fatal("the scheduler started a conversation with nothing pending")
 	}
 }
 
-// A manual conversation keeps the conversation slot; the analysis queue
-// yields to a collector run, which changes the material under it.
+// A manual conversation keeps the conversation slot; an analysis yields to
+// a collector run, which changes the material under it.
 func TestCollectorRunTakesTheSlotFromTheQueue(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
@@ -226,47 +243,59 @@ func TestCollectorRunTakesTheSlotFromTheQueue(t *testing.T) {
 
 	a.collecting = true
 	a.sendChat("hello")
-	if a.chat.busy || len(a.chat.messages) != 0 {
-		t.Fatal("a message was sent while a collector was running")
+	if len(a.chat.messages) != 1 || len(a.pending) != 1 {
+		t.Fatalf("a queued message was not accepted: %d rows, %d waiting", len(a.chat.messages), len(a.pending))
 	}
-	a.startAnalysis()
-	if a.chat.greetingPending {
+	a.startAnalysis(a.chat)
+	if a.turn != nil || a.chat.greetingPending {
 		t.Fatal("an analysis started while a collector was running")
 	}
 	if a.canStartWork() {
 		t.Fatal("work is startable while a collector runs")
 	}
 	a.collecting = false
+	a.pending = nil
+	a.chat.messages = nil
 
-	// A conversation keeps the slot.
+	// A manual conversation keeps the slot.
+	a.turn = a.chat
 	a.chat.busy = true
 	a.runCollectorNow(photosCollectorID)
 	if a.collecting {
 		t.Fatal("a collector started during a conversation")
 	}
+	a.turn = nil
 	a.chat.busy = false
 
-	// The queue yields: the run stops it before collecting.
-	a.analysis.Running = true
-	a.analysis.Current = dayKey(a.day)
-	a.analysis.Queue = []string{dayKey(a.day.AddDate(0, 0, -1))}
-	a.runCollectorNow(photosCollectorID)
-	if a.analysis.Running || a.analysis.Current != "" || len(a.analysis.Queue) != 0 {
-		t.Fatalf("the queue kept going: running=%v current=%q queue=%v", a.analysis.Running, a.analysis.Current, a.analysis.Queue)
+	// A running analysis yields: the run stops it without cancelling the
+	// day.
+	other := a.dayState(a.day.AddDate(0, 0, -1))
+	other.analysis = true
+	a.turn = other
+	if !a.takeConversationSlot() {
+		t.Fatal("a collector could not take the slot from an analysis")
 	}
-	if len(a.analysis.Cancelled) != 0 {
-		t.Fatalf("the run cancelled days: %v", a.analysis.Cancelled)
+	if a.turn != nil {
+		t.Fatal("the interrupted analysis kept the slot")
+	}
+	for _, task := range a.scheduler().Tasks() {
+		if task.State == schedule.TaskCancelled {
+			t.Fatalf("the collector run cancelled %s", task.Day)
+		}
 	}
 
-	// A manual analysis still waits for a queue that is running.
-	a.analysis.Running = true
+	// A manual analysis still waits while an analysis holds the slot.
+	other.analysis = true
+	a.turn = other
 	if a.canStartWork() {
-		t.Fatal("work is startable while the analysis queue runs")
+		t.Fatal("work is startable while an analysis runs")
 	}
 	a.reanalyze()
 	if a.chat.greetingPending {
-		t.Fatal("a manual analysis started while the queue runs")
+		t.Fatal("a manual analysis started while an analysis runs")
 	}
+	a.turn = nil
+	other.analysis = false
 }
 
 func TestCalendarYearJump(t *testing.T) {
@@ -320,7 +349,7 @@ func TestCollectorPageShowsGlobalUI(t *testing.T) {
 	a.page = "collectors"
 	tt := ui.NewTester(a.view, 1440, 900)
 	tt.Frame()
-	for _, s := range []string{"采集器", "采集插件", "相册照片", "每日分析", "立即执行", "一天", "一周", "一个月", "三个月", "启动所有", "暂停所有", "取消所有"} {
+	for _, s := range []string{"采集器", "采集插件", "相册照片", "每日分析", "立即触发", "一天", "一周", "一个月", "三个月", "启动所有", "取消所有"} {
 		if !tt.HasText(s) {
 			t.Errorf("missing %q", s)
 		}
@@ -356,7 +385,7 @@ func TestPhotosRangeSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.photosPlugin().value.Days = 2
-	a.syncRecentPhotoDays(false)
+	a.syncRecentPhotoDays()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) && a.collecting {
 		time.Sleep(10 * time.Millisecond)
@@ -494,8 +523,8 @@ func TestMaterialsShowsPhotoSourceFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.chat.manifest = m
-	a.chat.sheets = a.decodeSheets(m)
-	a.chat.thumbs = a.decodeThumbs(m)
+	a.chat.sheets = a.decodeSheets(a.chat, m)
+	a.chat.thumbs = a.decodeThumbs(a.chat, m)
 	a.chat.manifest.PhotoSource = "originals"
 	a.chat.manifest.PhotoNote = "PhotoKit 权限被拒绝，已退回 originals"
 	tt := ui.NewTester(a.view, 1300, 820)
@@ -505,40 +534,59 @@ func TestMaterialsShowsPhotoSourceFallback(t *testing.T) {
 	}
 }
 
-// The collectors page lists the analysis queue, and a cancelled day stays
-// visible as cancelled until it is restored.
+// The collectors page lists the scheduler's analysis tasks, and a
+// cancelled day stays visible as cancelled until it is restored.
 func TestCollectorAnalysisTasks(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
+	a.now = time.Now()
+	a.cfg.AutoTime = "10:00"
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-21"] = true
-	a.analysis.Queue = []string{"2026-10-21"}
-	// The rail is what this test looks at; the daily batch start has
-	// already had its slot today.
-	a.autoAnalyzeDay = dayKey(a.day)
+	a.syncAnalysisTasks()
+	if n := len(a.scheduler().Tasks()); n != 2 {
+		t.Fatalf("%d tasks, want 2: %+v", n, a.scheduler().Tasks())
+	}
 	a.page = "collectors"
 	tt := ui.NewTester(a.view, 1440, 900)
 	tt.Frame()
-	for _, want := range []string{"分析任务", "2026-10-21", "2026-10-20"} {
+	for _, want := range []string{"任务", "2026-10-21", "2026-10-20"} {
 		if !tt.HasText(want) {
 			t.Fatalf("the analysis list is missing %q: %q", want, tt.Texts())
 		}
 	}
-	if err := tt.Click("取消"); err != nil {
-		t.Fatal(err)
+	// Every recurring row has a 取消 too; cancel the waiting day directly.
+	a.cancelAnalysisTask("2026-10-20")
+	cancelled := 0
+	for _, task := range a.scheduler().Tasks() {
+		if task.State == schedule.TaskCancelled {
+			cancelled++
+		}
 	}
-	if len(a.analysis.Cancelled) != 1 {
-		t.Fatalf("cancelled %d days, want 1", len(a.analysis.Cancelled))
+	if cancelled != 1 {
+		t.Fatalf("cancelled %d days, want 1", cancelled)
 	}
 	tt.Frame()
 	if !tt.HasText("已取消") {
 		t.Errorf("the cancelled day is not shown: %q", tt.Texts())
 	}
-	if err := tt.Click("恢复"); err != nil {
-		t.Fatal(err)
+	// The rail test drives the restart action directly instead of clicking
+	// a label shared by every card.
+	cancelledDay := ""
+	for _, task := range a.scheduler().Tasks() {
+		if task.State == schedule.TaskCancelled {
+			cancelledDay = task.Day
+		}
 	}
-	if len(a.analysis.Cancelled) != 0 {
-		t.Fatalf("%d days stay cancelled", len(a.analysis.Cancelled))
+	a.restartAnalysisTask(cancelledDay)
+	cancelled = 0
+	for _, task := range a.scheduler().Tasks() {
+		if task.State == schedule.TaskCancelled {
+			cancelled++
+		}
+	}
+	if cancelled != 0 {
+		t.Fatalf("%d days stay cancelled", cancelled)
 	}
 }
 
@@ -547,15 +595,45 @@ func TestCollectorAnalysisTasks(t *testing.T) {
 func TestAnalysisStatusInSidebar(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
-	a.analysis.Running = true
-	a.analysis.Current = "2026-10-20"
-	a.analysis.Queue = []string{"2026-10-19"}
+	a.now = time.Now()
+	a.cfg.AutoTime = "10:00"
+	a.calendarChanged["2026-10-20"] = true
+	a.calendarChanged["2026-10-19"] = true
+	a.syncAnalysisTasks()
 	a.page = "board"
 	tt := ui.NewTester(a.view, 1440, 900)
 	tt.Frame()
-	if !tt.HasText("分析中 · 队列 1") {
+	if !tt.HasText("2 天待分析") {
 		t.Fatalf("the sidebar has no analysis status: %q", tt.Texts())
 	}
+}
+
+// The sidebar follows a manual turn too: its day gets the ring, and the
+// status says the AI is answering rather than analyzing.
+func TestSidebarShowsTheManualTurn(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	other := a.day.AddDate(0, 0, -1)
+	state := a.dayState(other)
+	a.turn = state
+	state.analysis = false
+	a.page = pageBoard
+	tt := ui.NewTester(a.view, 1440, 900)
+	tt.Frame()
+	if !tt.HasText("对话中") {
+		t.Fatalf("the sidebar does not show a manual turn: %q", tt.Texts())
+	}
+	if !tt.HasText(dayKey(other) + "，AI 正在回复") {
+		t.Fatalf("the calendar does not mark the replying day: %q", tt.Texts())
+	}
+	// A scheduled analysis keeps the analysis wording.
+	state.analysis = true
+	tt.Frame()
+	if !tt.HasText(dayKey(other) + "，AI 正在分析") {
+		t.Fatalf("the calendar does not mark the analyzed day: %q", tt.Texts())
+	}
+	a.turn = nil
+	state.analysis = false
 }
 
 // The photo collector keeps what it has by default, and its settings file
@@ -599,7 +677,7 @@ func TestPhotosKeepRemovedDefault(t *testing.T) {
 	if old.value.Days != 3 || !old.value.KeepRemoved {
 		t.Fatalf("an old file reads %+v", old.value)
 	}
-	if old.value.Schedule.Time != "22:00" {
+	if old.value.Schedule.Time != "21:00" {
 		t.Errorf("the schedule default was lost: %+v", old.value.Schedule)
 	}
 }
@@ -668,5 +746,80 @@ func TestCollectorSettingsMigration(t *testing.T) {
 	a.loadCollectorSettings()
 	if again := a.photosPlugin(); again.value.Days != 30 {
 		t.Fatalf("the second load read %+v", again.value)
+	}
+}
+
+// A run that collected nothing leaves no day folder, and still counts as
+// that day's run so the schedule does not repeat it.
+func TestEmptyCollectorRunLeavesNoFolder(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.photosPlugin().value.Days = 1
+	a.openDay(a.day)
+	a.runCollectorNow(photosCollectorID)
+	waitCollecting(t, a)
+	if _, err := os.Stat(a.cfg.workDayDir(a.day)); !os.IsNotExist(err) {
+		t.Fatal("a run that collected nothing left a day folder")
+	}
+	if _, ok := a.scheduler().Last(collectorJob(photosCollectorID)); !ok {
+		t.Fatal("the run was not recorded")
+	}
+	if len(a.collectorDay.Items) != 0 {
+		t.Fatalf("the selected day still shows a run: %v", a.collectorDay.Items)
+	}
+}
+
+// The calendar marks days with material, and pruning removes folders that
+// only hold collector state.
+func TestCalendarMarksOnlyDaysWithMaterial(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	stateOnly := a.day.AddDate(0, 0, -1)
+	withPhoto := a.day.AddDate(0, 0, -2)
+	sdir := a.cfg.workDayDir(stateOnly)
+	if err := os.MkdirAll(filepath.Join(sdir, "previews"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCollectorDay(sdir, collectorDay{Items: map[string]collectorRun{"photos": {Status: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	pdir := a.cfg.workDayDir(withPhoto)
+	if err := os.MkdirAll(filepath.Join(pdir, "previews"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pdir, "previews", "001.jpg"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCollectorDay(pdir, collectorDay{Items: map[string]collectorRun{"photos": {Status: "done", Fingerprint: "sha256:x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// A day with only a conversation is not material either.
+	chatOnly := a.day.AddDate(0, 0, -3)
+	cdir := a.cfg.workDayDir(chatOnly)
+	if err := os.MkdirAll(cdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cdir, "chat.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCollectorDay(cdir, collectorDay{Items: map[string]collectorRun{"photos": {Status: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a.reloadCalendar()
+	if !a.dataDays[dayKey(withPhoto)] {
+		t.Fatal("a day with material was not marked")
+	}
+	if a.dataDays[dayKey(stateOnly)] {
+		t.Fatal("a day with only collector state was marked")
+	}
+	if a.dataDays[dayKey(chatOnly)] {
+		t.Fatal("a day with only a conversation was marked")
+	}
+	a.pruneContentlessDays()
+	if _, err := os.Stat(sdir); !os.IsNotExist(err) {
+		t.Fatal("a state-only day folder survived pruning")
+	}
+	if _, err := os.Stat(filepath.Join(pdir, "previews", "001.jpg")); err != nil {
+		t.Fatal("a day with a photo was pruned:", err)
 	}
 }

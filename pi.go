@@ -34,15 +34,15 @@ type piTarget struct {
 // piTarget resolves the configured Pi binary and model. A missing Pi is an
 // error here, once, instead of three copies of the same checks.
 func (a *app) piTarget() (piTarget, error) {
-	bin := a.chat.piPath
+	bin := a.piPath
 	if bin == "" {
-		bin, a.chat.piErr = resolvePi()
+		bin, a.piErr = resolvePi()
 	}
 	if bin == "" {
-		if a.chat.piErr == "" {
-			a.chat.piErr = "还没有 Pi 运行环境"
+		if a.piErr == "" {
+			a.piErr = "还没有 Pi 运行环境"
 		}
-		return piTarget{}, errors.New(a.chat.piErr)
+		return piTarget{}, errors.New(a.piErr)
 	}
 	spec := providerFor(a.cfg.Provider)
 	model := strings.TrimSpace(a.cfg.Model)
@@ -53,9 +53,13 @@ func (a *app) piTarget() (piTarget, error) {
 	// carry the provider prefix.
 	model = strings.TrimPrefix(model, spec.ID+"/")
 	t := piTarget{bin: bin, spec: spec, model: model}
-	if key, err := appSecrets().Get(providerSecretKey(spec.ID)); err == nil {
-		if key := strings.TrimSpace(string(key)); key != "" {
-			t.env = append(t.env, spec.Env+"="+key)
+	// The keychain belongs to the signed app; tests have no window and
+	// must never prompt for it.
+	if a.win != nil {
+		if key, err := appSecrets().Get(providerSecretKey(spec.ID)); err == nil {
+			if key := strings.TrimSpace(string(key)); key != "" {
+				t.env = append(t.env, spec.Env+"="+key)
+			}
 		}
 	}
 	return t, nil
@@ -126,8 +130,8 @@ func (a *app) downloadPi() {
 			a.pi.installed = true
 			a.pi.path = bin
 			a.pi.stage = "Pi 已安装"
-			a.chat.piPath = bin
-			a.chat.piErr = ""
+			a.piPath = bin
+			a.piErr = ""
 		})
 	}()
 }

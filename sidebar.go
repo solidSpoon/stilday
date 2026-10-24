@@ -55,7 +55,7 @@ func (a *app) sidebar(c *ui.Context, vibrant bool) {
 			a.navRow(c, "事件", "事件", iconEvents, a.page == pageBoard, func() {
 				a.page = pageBoard
 			})
-			a.navRow(c, "采集器", "采集器", iconCollect, a.page == pageCollectors, func() {
+			a.navRow(c, "任务", "任务", iconTasks, a.page == pageCollectors, func() {
 				a.openCollectorPage()
 			})
 		})
@@ -199,37 +199,25 @@ func (a *app) navRow(c *ui.Context, label, accessibility string, icon *ui.SVG, c
 	}
 }
 
-// analysisStatus is the small right-aligned status in the settings row:
-// the background analysis stays out of the way.
-func (a *app) analysisStatus(c *ui.Context) {
+// backgroundStatus is the one summary beside 设置: a manual turn says so,
+// otherwise the number of days waiting. The analysis and collection
+// progress live on their queue cards.
+func (a *app) backgroundStatus(c *ui.Context) {
 	t := c.Theme()
-	switch {
-	case a.analysis.Running:
-		label := "分析中"
-		if n := len(a.analysis.Queue); n > 0 {
-			label = fmt.Sprintf("分析中 · 队列 %d", n)
-		}
-		ui.Text(c, label).FontSize(10.5).TextColor(t.TextMuted).
-			ContentTransition(ui.ContentTransition{Numeric: true})
-	case a.analysis.Paused:
-		ui.Text(c, "已暂停").FontSize(10.5).TextColor(t.TextMuted)
-	default:
-		if n := len(a.analysis.Pending()); n > 0 {
+	if s := a.scheduler(); s != nil && s.HasRunning() {
+		// The running card carries the progress.
+		return
+	}
+	if a.turn != nil {
+		ui.Text(c, "对话中").FontSize(10.5).TextColor(t.TextMuted)
+		return
+	}
+	if s := a.scheduler(); s != nil {
+		if n := s.CountPending(); n > 0 {
 			ui.Textf(c, "%d 天待分析", n).FontSize(10.5).TextColor(t.TextMuted).
 				ContentTransition(ui.ContentTransition{Numeric: true})
 		}
 	}
-}
-
-// backgroundStatus is the one short, spinner-free status beside 设置:
-// collection progress first, then the queued analysis.
-func (a *app) backgroundStatus(c *ui.Context) {
-	if a.collecting && strings.TrimSpace(a.collectProgress) != "" {
-		ui.Text(c, shortCollectProgress(a.collectProgress)).
-			FontSize(10.5).TextColor(c.Theme().TextMuted).SingleLine()
-		return
-	}
-	a.analysisStatus(c)
 }
 
 // settingsBar is the row at the bottom of the sidebar.
@@ -383,10 +371,19 @@ func (a *app) dayCell(c *ui.Context, d time.Time, w, h float32) {
 	future := d.After(midnight(a.now))
 	hasData := a.dataDays[key]
 	changed := a.calendarChanged[key]
+	working := a.aiWorkingDay() == key
+	analyzing := working && a.turn != nil && a.turn.analysis
 
 	label := key
 	if changed {
 		label += "，有采集变化"
+	}
+	if working {
+		if analyzing {
+			label += "，AI 正在分析"
+		} else {
+			label += "，AI 正在回复"
+		}
 	}
 	cell := ui.Box(c).Size(w, h).Radius(10).Center().Label(label)
 	cell.Children(func() {
@@ -410,6 +407,16 @@ func (a *app) dayCell(c *ui.Context, d time.Time, w, h float32) {
 		cell.Background(t.Accent).TextColor(t.AccentText)
 	case hasData:
 		cell.Background(t.SurfacePressed)
+	}
+	if working {
+		// A thin ring marks the day the AI is working on: that day holds
+		// the one conversation slot. On the selected (blue) cell the ring
+		// is the light text color so it stays visible.
+		ring := t.Accent
+		if chosen {
+			ring = t.AccentText
+		}
+		cell.Border(1, ring)
 	}
 	if today && !chosen {
 		// Today is a label, not a selected cell: no border and no fill.

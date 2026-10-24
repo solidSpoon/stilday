@@ -2,7 +2,9 @@ package main
 
 import (
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +45,7 @@ func (a *app) settingsPage(c *ui.Context) {
 				a.storageSettings(c)
 				if a.cfg.configured() {
 					a.launchSettings(c)
+					a.scheduleSettings(c)
 				}
 				a.modelSettings(c)
 				a.piSettings(c)
@@ -65,6 +68,26 @@ func (a *app) launchSettings(c *ui.Context) {
 				ui.Text(c, "关掉窗口不会退出：到点照常采集和分析，点菜单栏或 Dock 图标回来。").FontSize(11).TextColor(t.TextMuted)
 			})
 		})
+	})
+}
+
+// scheduleSettings is how late a missed scheduled job may still run.
+func (a *app) scheduleSettings(c *ui.Context) {
+	t := c.Theme()
+	group(c, func() {
+		groupTitle(c, "定时任务")
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "补跑窗口").FontSize(12).Width(70)
+			input := ui.TextInput(c, &a.catchUpDraft).Width(70).Placeholder("60").Label("补跑窗口（分钟）")
+			ui.Text(c, "分钟").FontSize(11).TextColor(t.TextMuted)
+			if input.Changed() {
+				if n, err := strconv.Atoi(strings.TrimSpace(a.catchUpDraft)); err == nil && n > 0 {
+					a.settingsDraft.CatchUpMinutes = n
+				}
+			}
+		})
+		ui.Text(c, "错过计划时间后，启动 app 时在窗口内仍会补跑；超过就等下一次。默认 60 分钟。").
+			FontSize(11).TextColor(t.TextMuted)
 	})
 }
 
@@ -276,7 +299,7 @@ func (a *app) piSettings(c *ui.Context) {
 				if ui.Button(c, "重新检查").Clicked() {
 					a.pi.path = installedPiBinary()
 					a.pi.installed = a.pi.path != ""
-					a.chat.piPath, a.chat.piErr = resolvePi()
+					a.piPath, a.piErr = resolvePi()
 				}
 			})
 			ui.Text(c, "如果不用 API key，可以在这里登录 Pi：在终端里输入 /login。登录信息在 ~/.pi/agent，Stilday 共用。").FontSize(11).TextColor(t.TextMuted)
@@ -327,7 +350,7 @@ func (a *app) mcpSettings(c *ui.Context) {
 				Grow(1).MinWidth(0).SingleLine()
 			a.copyButton(c, "复制地址", url)
 		})
-		if a.settingsDraft != a.cfg {
+		if !configEqual(a.settingsDraft, a.cfg) {
 			ui.Text(c, "保存后生效。").FontSize(11).TextColor(t.TextMuted)
 			return
 		}
@@ -375,7 +398,12 @@ func (a *app) copyButton(c *ui.Context, idle, text string) {
 // settingsDirty reports whether the page holds changes that are not in the
 // saved configuration yet.
 func (a *app) settingsDirty() bool {
-	return strings.TrimSpace(a.keyDraft) != "" || a.settingsDraft != a.cfg
+	return strings.TrimSpace(a.keyDraft) != "" || !configEqual(a.settingsDraft, a.cfg)
+}
+
+// configEqual compares configurations, including the day list.
+func configEqual(a, b config) bool {
+	return reflect.DeepEqual(a, b)
 }
 
 // openSettings copies the configuration into a draft the page edits.
@@ -384,6 +412,7 @@ func (a *app) openSettings() {
 		return
 	}
 	a.settingsDraft = a.cfg.withDefaults()
+	a.catchUpDraft = strconv.Itoa(a.settingsDraft.CatchUpMinutes)
 	if a.settingsDraft.StorageDir == "" {
 		a.settingsDraft.StorageDir = suggestStorageDir()
 	}
@@ -441,13 +470,14 @@ func (a *app) saveSettings() {
 	a.page = pageBoard
 	a.boardDirty = true
 	a.settingsErr = ""
-	a.closeAgent()
-	a.resetForDay()
+	a.resetAllDays()
+	a.chat = a.dayState(a.day)
 	a.chat.forcePrep = storageChanged || windowChanged
 	if storageChanged {
 		a.loadEntries()
 	}
 	a.reloadCalendar()
+	a.syncAnalysisTasks()
 	a.calendar.ScrollTo(0, ui.Start)
 }
 

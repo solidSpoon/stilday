@@ -11,26 +11,20 @@ import (
 	"stilday/agent"
 )
 
-// sheetData is every contact sheet of the day, the images the one-off
-// greeting call and the main analysis both see.
-func (a *app) sheetData() [][]byte {
-	if a.chat.manifest == nil || a.chat.dir == "" {
+// sheetDataFor is every contact sheet of a day, the images the one-off
+// greeting call sees.
+func (a *app) sheetDataFor(s *chatState) [][]byte {
+	if s == nil {
 		return nil
 	}
-	var out [][]byte
-	for _, sh := range a.chat.manifest.Sheets {
-		b, err := os.ReadFile(filepath.Join(a.chat.dir, sh.File))
-		if err == nil && len(b) > 0 {
-			out = append(out, b)
-		}
-	}
-	return out
+	return sheetFiles(s.dir, s.manifest)
 }
 
 // prepareGreeting runs before the analysis prompt: it asks a one-off Pi in
 // a temporary directory for a fresh opening line from the day's screenshot,
-// then puts it in the composer and sends it.
-func (a *app) prepareGreeting(target piTarget, sheets [][]byte) {
+// then puts it in that day's conversation and sends it. The day already
+// holds the turn slot.
+func (a *app) prepareGreeting(s *chatState, target piTarget, sheets [][]byte) {
 	greeting := ""
 	if len(sheets) > 0 && a.win != nil && target.bin != "" {
 		greeting = a.generateGreeting(target, sheets)
@@ -40,15 +34,17 @@ func (a *app) prepareGreeting(target piTarget, sheets [][]byte) {
 		greeting = "今天也发生了一些小事，想跟你分享一下。"
 	}
 	if a.win == nil {
-		a.chat.greetingPending = false
+		// No frame loop (tests): release the slot; nothing will send.
+		s.greetingPending = false
+		a.settleTurn(s)
 		return
 	}
 	a.win.Update(func() {
-		if !a.chat.greetingPending {
+		if a.turn != s || !s.greetingPending {
 			return
 		}
-		a.chat.greetingPending = false
-		a.sendChat(greeting)
+		s.greetingPending = false
+		a.startGreetingTurn(s, greeting)
 	})
 }
 

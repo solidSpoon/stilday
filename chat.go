@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +13,6 @@ import (
 
 	"stilday/agent"
 )
-
-// chatMessage is one row of the conversation. Tool runs are rows too, so
-// the user can see what the model looked at.
 
 // chatMessage is one row of the conversation. Tool runs are rows too, so
 // the user can see what the model looked at.
@@ -35,9 +31,6 @@ type chatMessage struct {
 
 // chatRow is one rendered row: a message, or the turn's tool calls
 // collapsed into one compact line.
-
-// chatRow is one rendered row: a message, or the turn's tool calls
-// collapsed into one compact line.
 type chatRow struct {
 	key     any
 	msg     *chatMessage
@@ -45,14 +38,13 @@ type chatRow struct {
 	pending bool
 }
 
-// chatState is the day's conversation, its Pi process, and the photos the
-// model is looking at.
-
-// chatState is the day's conversation, its Pi process, and the photos the
-// model is looking at.
+// chatState is one day's conversation, its Pi process, and the photos the
+// model is looking at. Every day the app has opened or analyzed keeps its
+// own state, so switching days does not stop a turn.
 type chatState struct {
 	loaded   bool
-	day      string
+	day      string // YYYY-MM-DD
+	date     time.Time
 	dir      string
 	messages []*chatMessage
 	byCall   map[string]*chatMessage
@@ -60,13 +52,15 @@ type chatState struct {
 	md       markdown.Options
 	input    string
 
-	busy        bool
-	preparing   bool
-	prepSeq     int
-	progress    string
-	err         string
-	forcePrep   bool
-	autoAnalyze bool
+	busy      bool
+	preparing bool
+	prepSeq   int
+	progress  string
+	err       string
+	forcePrep bool
+	// analysis marks the turn as the scheduler's analysis job, which
+	// reports its outcome when the turn settles.
+	analysis bool
 
 	manifest        *manifest
 	sheets          []*ui.Bitmap
@@ -79,92 +73,122 @@ type chatState struct {
 	sheetsSent      bool
 	systemOpen      bool
 	greetingPending bool
-
-	piPath string
-	piErr  string
 }
 
-// openDay switches the chat to a day, closing the previous Pi process.
+// newChatState is the empty conversation before any day is opened.
+func newChatState() *chatState {
+	return &chatState{byCall: map[string]*chatMessage{}}
+}
 
-// openDay switches the chat to a day, closing the previous Pi process.
-func (a *app) openDay(day time.Time) {
+// dayState returns a day's conversation, loading its transcript and
+// manifest from disk the first time it is asked for. It does not select
+// the day and does not prepare anything.
+func (a *app) dayState(day time.Time) *chatState {
 	key := dayKey(day)
-	dir := ""
+	if s, ok := a.chats[key]; ok {
+		return s
+	}
+	s := newChatState()
+	s.loaded = true
+	s.day = key
+	s.date = midnight(day)
 	if a.cfg.configured() {
-		dir = a.cfg.workDayDir(day)
+		s.dir = a.cfg.workDayDir(day)
 	}
-	if a.chat.loaded && a.chat.day == key && a.chat.dir == dir {
-		return
-	}
-	a.resetForDay()
-	a.chat.loaded = true
-	a.chat.day = key
-	a.chat.dir = dir
-	if dir == "" {
-		return
+	if s.dir == "" {
+		a.chats[key] = s
+		return s
 	}
 	// Opening a day only looks at it: the work folder appears when
 	// something is written into it, so a visit leaves no empty folder
 	// behind (and the calendar has nothing to mark).
-	a.chat.messages = loadTranscript(dir)
-	for _, m := range a.chat.messages {
-		a.chat.nextID++
-		m.ID = a.chat.nextID
+	s.messages = loadTranscript(s.dir)
+	for _, m := range s.messages {
+		s.nextID++
+		m.ID = s.nextID
 		if m.Images > 0 || m.Role == "assistant" {
-			a.chat.sheetsSent = true
+			s.sheetsSent = true
 		}
 	}
-	a.collectorDay = loadCollectorDay(dir)
-	if m, err := loadManifest(dir); err == nil {
-		a.chat.manifest = m
-		a.chat.sheets = a.decodeSheets(m)
-		a.chat.thumbs = a.decodeThumbs(m)
+	if m, err := loadManifest(s.dir); err == nil {
+		s.manifest = m
+		s.sheets = a.decodeSheets(s, m)
+		s.thumbs = a.decodeThumbs(s, m)
 	}
-	if a.chat.forcePrep && a.win != nil {
+	a.chats[key] = s
+	return s
+}
+
+// openDay selects a day, loading its conversation, collector state and
+// manifest. Other days keep their state and their agents.
+func (a *app) openDay(day time.Time) {
+	key := dayKey(day)
+	switched := a.chat == nil || a.chat.day != key
+	a.chat = a.dayState(day)
+	if switched {
+		a.collectorDay = loadCollectorDay(a.chat.dir)
+	}
+	// Opening a day only reads what the collectors already wrote: the
+	// library is read by the scheduled run, not by a page.
+	if a.chat.forcePrep {
 		a.chat.forcePrep = false
-		a.prepareDay(true)
-	} else if a.chat.manifest == nil && photosLibrary() != "" && a.win != nil {
-		a.prepareDay(false)
+		a.chat.manifest = nil
+		a.chat.sheets = nil
+		a.chat.thumbs = nil
+	}
+	if a.chat.manifest == nil && a.chat.dir != "" {
+		a.reloadMaterials(a.chat.dir)
 	}
 }
 
-// resetForDay drops the chat state so the next openDay loads the selected
-// day from disk.
-
-// resetForDay drops the chat state so the next openDay loads the selected
-// day from disk.
+// resetForDay drops the selected day's cached conversation so the next
+// openDay loads it from disk again. Other days keep theirs.
 func (a *app) resetForDay() {
-	a.closeAgent()
-	a.chat.reset()
+	if a.chat != nil {
+		a.chat.prepSeq++
+		a.closeAgent(a.chat)
+		if a.chat.day != "" && a.chats[a.chat.day] == a.chat {
+			delete(a.chats, a.chat.day)
+		}
+		if a.turn == a.chat {
+			a.turn = nil
+		}
+	}
+	a.chat = newChatState()
 	a.resetPhotos()
 }
 
-// reset returns the conversation to its pre-open state. The day's folder,
-// its photos and its manifest are loaded again by openDay.
-
-// reset returns the conversation to its pre-open state. The day's folder,
-// its photos and its manifest are loaded again by openDay.
-func (s *chatState) reset() {
-	s.loaded = false
-	s.day = ""
-	s.dir = ""
-	s.clearMessages()
-	s.manifest = nil
-	s.sheets = nil
-	s.thumbs = nil
-	s.busy = false
-	s.preparing = false
-	s.prepSeq++
-	s.progress = ""
-	s.err = ""
-	s.forcePrep = false
-	s.autoAnalyze = false
-	s.systemOpen = false
-	s.greetingPending = false
+// resetAllDays closes every day's agent and forgets the cached
+// conversations, as a storage change requires.
+func (a *app) resetAllDays() {
+	a.closeAllAgents()
+	// Interrupt on the scheduler that existed before the setting change:
+	// asking for a scheduler here would build the new storage's one and
+	// sync it against the old root's changed days.
+	if a.sched != nil {
+		if task, ok := a.sched.RunningTask(); ok {
+			a.sched.Interrupt(task.ID, a.analysisDue(a.clockNow()))
+		}
+	}
+	a.chats = map[string]*chatState{}
+	a.turn = nil
+	a.pending = nil
+	a.chat = newChatState()
+	a.resetPhotos()
 }
 
-// clearMessages drops the transcript rows, the streaming target and the
-// list position, keeping the day and its material.
+// closeAllAgents closes every day's Pi child, as a storage change or a quit
+// needs.
+func (a *app) closeAllAgents() {
+	for _, s := range a.chats {
+		s.prepSeq++
+		a.closeAgent(s)
+	}
+	if a.chat != nil && a.chats[a.chat.day] != a.chat {
+		a.chat.prepSeq++
+		a.closeAgent(a.chat)
+	}
+}
 
 // clearMessages drops the transcript rows, the streaming target and the
 // list position, keeping the day and its material.
@@ -176,95 +200,23 @@ func (s *chatState) clearMessages() {
 	s.list = ui.ListState{}
 }
 
-// prepareDay copies the day's photos, builds the numbered contact sheets,
-// and writes the manifest. It runs off the main thread and reports back
-// through Window.Update.
-func (a *app) prepareDay(force bool) {
-	if a.chat.preparing || !a.cfg.configured() || a.chat.dir == "" {
-		return
+// dayOf returns a state's day as a local midnight.
+func (s *chatState) dayOf() time.Time {
+	if !s.date.IsZero() {
+		return s.date
 	}
-	if !force && a.chat.manifest != nil {
-		return
+	if d, err := parseDayKey(s.day); err == nil {
+		return d
 	}
-	library := photosLibrary()
-	if library == "" {
-		a.chat.err = "找不到 macOS 照片图库。"
-		a.chat.autoAnalyze = false
-		return
-	}
-	start, end, err := a.cfg.photoWindow(a.day)
-	if err != nil {
-		a.chat.err = err.Error()
-		a.chat.autoAnalyze = false
-		return
-	}
-	dir := a.chat.dir
-	cfg := a.cfg
-	day := a.day
-	a.chat.preparing = true
-	a.chat.prepSeq++
-	seq := a.chat.prepSeq
-	a.chat.progress = "正在整理照片…"
-	opts := photoOptions{
-		Source:    library,
-		Day:       day,
-		Start:     start,
-		End:       end,
-		MaxPhotos: cfg.MaxPhotos,
-		SheetSize: sheetCols * sheetRows,
-	}
-	go func() {
-		m, err := preparePhotos(dir, opts, func(stage string, done, total int) {
-			if a.win == nil {
-				return
-			}
-			text := stage
-			if total > 0 {
-				text = fmt.Sprintf("%s %d/%d", stage, done, total)
-			}
-			a.win.Update(func() {
-				if a.chat.prepSeq != seq {
-					return
-				}
-				a.chat.progress = text
-			})
-		})
-		if a.win == nil {
-			return
-		}
-		a.win.Update(func() {
-			if a.chat.prepSeq != seq {
-				return
-			}
-			a.chat.preparing = false
-			if err != nil {
-				a.chat.err = "照片整理失败：" + err.Error()
-				a.chat.manifest = nil
-				a.chat.sheets = nil
-				a.chat.thumbs = nil
-				a.chat.autoAnalyze = false
-				a.markCollector(photosCollectorID, "error", err.Error())
-				return
-			}
-			a.chat.manifest = m
-			a.chat.sheets = a.decodeSheets(m)
-			a.chat.thumbs = a.decodeThumbs(m)
-			a.chat.err = ""
-			a.markCollector(photosCollectorID, "done", "")
-			if a.chat.autoAnalyze {
-				a.chat.autoAnalyze = false
-				a.startAnalysis()
-			}
-		})
-	}()
+	return time.Time{}
 }
 
 // decodeSheets loads the contact sheets, keeping one slot per manifest
 // sheet so a picture still knows which sheet it is.
-func (a *app) decodeSheets(m *manifest) []*ui.Bitmap {
+func (a *app) decodeSheets(s *chatState, m *manifest) []*ui.Bitmap {
 	out := make([]*ui.Bitmap, len(m.Sheets))
-	for i, s := range m.Sheets {
-		data, err := os.ReadFile(filepath.Join(a.chat.dir, s.File))
+	for i, sh := range m.Sheets {
+		data, err := os.ReadFile(filepath.Join(s.dir, sh.File))
 		if err != nil {
 			continue
 		}
@@ -278,11 +230,7 @@ func (a *app) decodeSheets(m *manifest) []*ui.Bitmap {
 // decodeThumbs loads the 资料 panel's thumbnails. Manifests written before
 // thumbs existed fall back to the previews for small days; larger old days
 // stay a list until the collector rewrites them.
-
-// decodeThumbs loads the 资料 panel's thumbnails. Manifests written before
-// thumbs existed fall back to the previews for small days; larger old days
-// stay a list until the collector rewrites them.
-func (a *app) decodeThumbs(m *manifest) []*ui.Bitmap {
+func (a *app) decodeThumbs(s *chatState, m *manifest) []*ui.Bitmap {
 	out := make([]*ui.Bitmap, len(m.Photos))
 	for i, p := range m.Photos {
 		rel := p.Thumb
@@ -292,7 +240,7 @@ func (a *app) decodeThumbs(m *manifest) []*ui.Bitmap {
 		if rel == "" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(a.chat.dir, rel))
+		data, err := os.ReadFile(filepath.Join(s.dir, rel))
 		if err != nil {
 			continue
 		}
@@ -303,9 +251,6 @@ func (a *app) decodeThumbs(m *manifest) []*ui.Bitmap {
 	}
 	return out
 }
-
-// chatHeader is the day's small contact card above the thread: an avatar,
-// the assistant's name, and a glass button that opens the prompt.
 
 // chatHeader is the day's small contact card above the thread: an avatar,
 // the assistant's name, and a glass button that opens the prompt.
@@ -321,8 +266,7 @@ func (a *app) chatHeader(c *ui.Context) {
 				ui.Column(c).Absolute().Top(46).Left(0).Right(0).AlignItems(ui.Center).
 					Children(func() {
 						pill := ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(7, 16).Radius(18).
-							Material(glass.Glass{Tint: t.Surface.Alpha(0.7)}).
-							Border(1, t.Border.Alpha(0.45))
+							Material(glass.Glass{Tint: t.Text.Alpha(0.07)})
 						pill.Children(func() {
 							ui.Text(c, "Stilday").FontSize(13).Bold().TextColor(t.Text)
 							ui.Icon(c, iconChevron).FontSize(12).TextColor(t.TextMuted)
@@ -357,8 +301,6 @@ func (a *app) promptForDrawer() string {
 	}
 	return text
 }
-
-// systemPromptModal is the centered dialog with the system prompt.
 
 // systemPromptModal is the centered dialog with the system prompt.
 func (a *app) systemPromptModal(c *ui.Context) {
@@ -403,6 +345,3 @@ func (a *app) chatMessages(c *ui.Context) {
 		a.chatRow(c, rows[i])
 	}).Grow(1).Padding(20, 20, 16).Gap(18).Justify(ui.End)
 }
-
-// chatRows collapses all tool calls of one turn into a single row at the
-// first tool's place, so a turn does not grow a chip per call.
