@@ -2,7 +2,7 @@
 // quiet day that leaves one line behind, not about its features. Everything is
 // vector, so every size macOS asks for comes from one description.
 //
-//	go run ./tools/icon            # writes resources/icon.png and icon-dev.png
+//	go run ./tools/icon            # writes resources/icon.png, icon-dev.png and tray.png
 //
 // The tile keeps Apple's icon grid: an 824 squircle centred on 1024, corner
 // radius 185, nothing baked behind it.
@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/vector"
 )
 
@@ -125,6 +126,27 @@ func (c *canvas) composite(src image.Image, m *image.Alpha) {
 
 func (c *canvas) solid(build func(*vector.Rasterizer), col color.NRGBA) {
 	c.fill(build, image.NewUniform(col))
+}
+
+// erase cuts a shape out of the canvas, back to transparent: the menu bar icon
+// has no colour to draw a groove with. draw.DrawMask cannot do it — with Src and
+// a mask it clears the whole destination, and DstOut is not exported — so the
+// premultiplied pixels are scaled by the mask's inverse here.
+func (c *canvas) erase(build func(*vector.Rasterizer)) {
+	m := c.mask(build)
+	for y := 0; y < c.size; y++ {
+		for x := 0; x < c.size; x++ {
+			a := uint32(m.AlphaAt(x, y).A)
+			if a == 0 {
+				continue
+			}
+			keep := 255 - a
+			i := c.img.PixOffset(x, y)
+			for k := 0; k < 4; k++ {
+				c.img.Pix[i+k] = uint8(uint32(c.img.Pix[i+k]) * keep / 255)
+			}
+		}
+	}
 }
 
 func (c *canvas) mask(build func(*vector.Rasterizer)) *image.Alpha {
@@ -257,8 +279,6 @@ func arc(r *vector.Rasterizer, cx, cy, rad, a0, a1, k float64) {
 	}
 }
 
-// capsule is a thick round-capped stroke. Both caps have to start where the
-// pen already is, or the path cuts across and the shape comes out as a sliver.
 func (c *canvas) capsule(x1, y1, x2, y2, w float64) func(*vector.Rasterizer) {
 	return func(r *vector.Rasterizer) {
 		ang := math.Atan2(y2-y1, x2-x1)
@@ -510,8 +530,84 @@ var (
 	}
 )
 
+// tray paints the menu bar icon: the same snail, but at 16 points and in flat
+// black with transparent gaps, because the menu bar tints a template image
+// itself. It is drawn on a 16-unit grid rather than the icon's 1024 one.
+// tray draws the menu bar icon: a solid snail with thin cuts in it. At 16
+// points the menu bar shows weights, not outlines — a shape this small
+// reads through the gaps between its parts, as the system's own glyphs do,
+// so the shell is filled and only the spiral and the neck are cut out.
+func tray(size int) *canvas {
+	// At 16 points the menu bar shows weights, not outlines: the parts are
+	// filled, and the shape reads through the thin gaps between them — the
+	// spiral in the shell, the neck between the head and the shell.
+	const scale = 8
+	m := newCanvas(size * scale)
+	m.k = float64(size*scale) / 16
+	ink := color.NRGBA{0, 0, 0, 255}
+	const cut = 0.62 // the width of a gap, in the 16-unit grid
+
+	// The foot: the bottom edge stays on the ground along its whole length,
+	// and the tail is made by thinning the top, as a snail's foot rests.
+	const ground = 13.7
+	feet := []spine{
+		{2.5, ground - 1.5, 1.5},
+		{7.0, ground - 1.45, 1.45},
+		{11.5, ground - 1.2, 1.2},
+		{14.4, ground - 0.6, 0.6},
+		{15.2, ground - 0.2, 0.2},
+	}
+	m.solid(m.stroke(feet), ink)
+	m.solid(m.circle(3.9, 10.6, 1.95), ink)
+	// The antennae: thin stalks with a bead at the tip.
+	m.solid(m.capsule(3.55, 8.9, 2.9, 5.7, 0.6), ink)
+	m.solid(m.capsule(4.35, 8.8, 4.75, 5.5, 0.6), ink)
+	m.solid(m.circle(2.85, 5.5, 0.78), ink)
+	m.solid(m.circle(4.8, 5.3, 0.78), ink)
+
+	// The shell: filled, with the spiral cut out of it. It stands off the
+	// head, which leaves the neck as a gap.
+	shx, shy, shr := 11.0, 7.0, 4.7
+	m.solid(m.circle(shx, shy, shr), ink)
+	m.erase(m.spiralShell(shx+0.35, shy+0.4, 0.15, 0.58, cut, 1.3, 0.25, 2.0))
+
+	c := newCanvas(size)
+	box := m.inkBounds()
+	if box.Empty() {
+		return c
+	}
+	pad := float64(size) / 32
+	f := math.Min((float64(size)-2*pad)/float64(box.Dx()), (float64(size)-2*pad)/float64(box.Dy()))
+	dw, dh := float64(box.Dx())*f, float64(box.Dy())*f
+	x0 := (float64(size) - dw) / 2
+	y0 := (float64(size) - dh) / 2
+	xdraw.CatmullRom.Scale(c.img,
+		image.Rect(int(math.Round(x0)), int(math.Round(y0)), int(math.Round(x0+dw)), int(math.Round(y0+dh))),
+		m.img, box, xdraw.Over, nil)
+	return c
+}
+
+// inkBounds is the box of the mark's opaque pixels.
+func (c *canvas) inkBounds() image.Rectangle {
+	var b image.Rectangle
+	for y := 0; y < c.size; y++ {
+		for x := 0; x < c.size; x++ {
+			if c.img.Pix[c.img.PixOffset(x, y)+3] == 0 {
+				continue
+			}
+			r := image.Rect(x, y, x+1, y+1)
+			if b.Empty() {
+				b = r
+			} else {
+				b = b.Union(r)
+			}
+		}
+	}
+	return b
+}
+
 func main() {
-	out := flag.String("out", "resources", "directory for icon.png and icon-dev.png")
+	out := flag.String("out", "resources", "directory for icon.png, icon-dev.png and tray.png")
 	flag.Parse()
 	for _, v := range []struct {
 		name string
@@ -524,5 +620,9 @@ func main() {
 		if err := snail(1024, v.pal).write(path); err != nil {
 			log.Fatalf("icon: %v", err)
 		}
+	}
+	// The menu bar wants 16 points, 32 pixels on a Retina screen.
+	if err := tray(32).write(filepath.Join(*out, "tray.png")); err != nil {
+		log.Fatalf("tray icon: %v", err)
 	}
 }
