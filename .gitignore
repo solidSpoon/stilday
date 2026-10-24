@@ -1,0 +1,12 @@
+/build/
+/.gocache/
+/.swift-cache/
+/.idea/
+/.agents/
+/.claude/
+/one/
+/pi/node_modules/
+.DS_Store
+mygo_windows_*.syso
+/stilday
+/stilday.exe
