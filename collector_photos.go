@@ -154,7 +154,7 @@ func (a *app) runCollectorNow(id string) {
 // days. Only disk work and the plugin run happen off the UI thread; the
 // state the views read is published in one step at the end.
 func (a *app) syncRecentPhotoDays(auto bool) {
-	if !a.cfg.configured() || !a.canStartWork() {
+	if !a.cfg.configured() || !a.takeConversationSlot() {
 		return
 	}
 	p := a.photosPlugin()

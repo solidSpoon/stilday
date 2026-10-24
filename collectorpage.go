@@ -21,7 +21,6 @@ func (a *app) collectorPage(c *ui.Context) {
 			ui.Text(c, a.settingsErr).FontSize(11).TextColor(t.Danger).SingleLine()
 		}
 	}, func() {
-		beforeCfg := a.cfg
 		ui.Row(c).Fill().Children(func() {
 			ui.Scroll(c).Grow(1).MinWidth(0).FillHeight().
 				Padding(barHeight+24, 28, 24).ScrollbarInsets(barHeight+8, 0, 0).Gap(16).Children(func() {
@@ -30,9 +29,6 @@ func (a *app) collectorPage(c *ui.Context) {
 			})
 			a.collectorSidebar(c)
 		})
-		if a.cfg != beforeCfg {
-			a.collectorAppDirty = true
-		}
 		for _, p := range a.collectorList {
 			if p.SettingsChanged() {
 				a.collectorSettingsDirty = true
@@ -59,7 +55,17 @@ func (a *app) collectorAnalysisPlan(c *ui.Context) {
 				FontSize(11).TextColor(t.TextMuted).Grow(1).MinWidth(0).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, "每天").FontSize(11).TextColor(t.TextMuted)
-			ui.TextInput(c, &a.cfg.AutoTime).Width(80).Placeholder("10:00").Label("每日分析时间")
+			// Save only a complete time: typing "1" or "10:" is not an
+			// edit to hand to the clock.
+			when := ui.TextInput(c, &a.cfg.AutoTime).Width(80).Placeholder("10:00").Label("每日分析时间")
+			if when.Changed() {
+				if _, err := clockOn(a.day, normalizeClock(a.cfg.AutoTime)); err == nil {
+					a.collectorAppDirty = true
+				}
+			}
+			if ui.PrimaryButton(c, "立即执行").Disabled(!a.canStartAnalysis()).Clicked() {
+				a.analysis.StartPending()
+			}
 		})
 	})
 }
@@ -129,8 +135,7 @@ func (a *app) analysisTasks(c *ui.Context) {
 			// Appending days to a run already in progress is safe even
 			// while it owns the conversation slot; starting a new run is
 			// not, so the same lock the manual actions use applies.
-			canStart := a.analysis.CanStart() && (a.analysis.Running || a.chatIdle())
-			glassAction(c, iconPlay, "启动所有", canStart, ui.Color{}, a.analysis.StartPending)
+			glassAction(c, iconPlay, "启动所有", a.canStartAnalysis(), ui.Color{}, a.analysis.StartPending)
 			glassAction(c, iconPause, "暂停所有", a.analysis.CanPause(), ui.Color{}, a.analysis.Pause)
 			glassAction(c, iconStop, "取消所有", a.analysis.CanCancel(), ui.Color{}, a.analysis.CancelAll)
 		})
@@ -273,7 +278,7 @@ func (a *app) collectorRow(c *ui.Context, p collector) {
 			ui.TextInput(c, &s.Time).Width(80).Placeholder("21:00").Label(p.Name() + "采集时间")
 			ui.Text(c, "自动执行").FontSize(11).TextColor(t.TextMuted)
 			ui.Spacer(c)
-			if ui.PrimaryButton(c, "立即执行").Disabled(!a.canStartWork()).Clicked() {
+			if ui.PrimaryButton(c, "立即执行").Disabled(!a.canStartCollector()).Clicked() {
 				a.runCollectorNow(p.ID())
 			}
 		})

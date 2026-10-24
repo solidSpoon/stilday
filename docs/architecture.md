@@ -23,6 +23,7 @@
 | 页面 | `app.go`、`sidebar.go`、`calendar.go`、`board.go`、`day.go`、`panels.go`、`settings.go`、`collectorpage.go` | 窗口壳、导航、日历、事件板、一天三栏、设置、采集器页 |
 | 视觉 | `chrome.go`、`kind.go`、`icons.go` | 主题、页面壳、分组、玻璃按钮、事件配色与标签 |
 | 扩展 | `extension.go`、`pi/stilday.ts` | 释放给 Pi 的三个工具 |
+| 对外查询 | `mcp_server.go` | 本机 MCP 端点（127.0.0.1）、`search_events` 工具、端口与启停 |
 
 目录就是包边界：
 
@@ -59,10 +60,11 @@ stilday/
    重新分析走 `restartConversation` + `clearDayAnalysis`。不要再手写一串
    字段清零——之前三处拷贝已经开始漂移。
 5. **分析队列是状态机。** UI 只读 `a.analysis` 的字段和调用
-   `Pending/CanStart/CanPause/CanCancel/StartPending/Pause/CancelAll/Finish`；
+   `Pending/CanStart/CanPause/CanCancel/StartPending/Pause/CancelAll/StopRun/Finish`；
    `Running`、`Current`、`Queue` 的迁移只发生在 `internal/analysis`。采集器
    只更新指纹并刷新待分析列表，不写队列；到点批量启动直接 `StartPending`，
-   两边没有先后依赖。
+   两边没有先后依赖。采集器**开始**执行时调 `StopRun()`：停掉正在分析的那天、
+   清空队列，待分析的天不标记取消，扫完重算时还会回来。
 6. **产物行只由 `entryRecord` 编解码。** 写入用 `encoding/json`（关闭 HTML
    转义）；`ts`、`data.summary` 只作为读兼容存在。不要再手拼 JSON。
 7. **路径只由少数函数拼。** `config.workDayDir` / `config.artifactPath` /
@@ -71,9 +73,29 @@ stilday/
 8. **页面身份用 `pageID` 常量**，不要比较字符串字面量。
 9. **会话只有一个执行槽。** `chat.busy`、`chat.preparing`、
    `chat.greetingPending`、`collecting` 共用这个槽；手动发消息、手动分析、
-   立即执行采集、定时采集、定时分析和「启动所有」都先问 `chatIdle()` /
-   `canStartWork()`，不要在入口各写一套条件。分析队列自己的 `startAnalysis`
-   只看 `chatIdle()`，因为它就是槽的持有者。
+   采集、定时任务都先问 `chatIdle()` / `takeConversationSlot()`，不要在入口
+   各写一套条件。规则：
+   - 手动聊天占着槽时，采集器不抢（`chatIdle()` 为假）；
+   - 分析队列占着槽时，采集器可以抢：`analysis.StopRun()` 停掉它再跑，因为
+     扫描会换掉正在分析的素材；
+   - 分析队列自己的 `startAnalysis` 只看 `chatIdle()`，它自己就是槽的持有者。
+
+## 任务调度
+
+采集、分析、手动动作共用一个执行槽：**串行，但没有先后依赖**。
+
+- **采集插件**按各自的每日时间跑（手动「立即执行」一样）。开始执行时先
+  `analysis.StopRun()`：停掉正在分析的那天、清空队列；待分析的天不标取消。
+  每次执行结束（`finishCollector`；相册的范围同步是整段结束）都
+  `refreshChangedDays()`，重算待分析列表。手动聊天占着槽时采集器等它结束。
+- **分析队列**只读这份待分析列表，按天逐个分析。到「每日分析」时间
+  `maybeAutoAnalyze` 调 `StartPending`；行末的「立即执行」和右侧「启动所有」
+  是同一个入口。
+- **手动动作**（发消息、重新分析）先占槽，槽被占着时不插队。
+
+所以「采集完再分析」不是依赖，只是碰巧串行：采集到点就跑，分析到点看当前
+待分析列表，两边互不等待，只保证不同时跑。新增插件时，执行结束的收尾走
+`finishCollector`，不要自己另起一套重算或另抢一次槽。
 
 ## 数据流
 
@@ -88,6 +110,15 @@ stilday/
                                                       │
                                     artifacts/YYYY.jsonl ──► 日历标记 / 事件板
 ```
+
+## 对外查询
+
+`mcp_server.go` 在设置页打开后监听 `127.0.0.1:<端口>/mcp`，用官方
+`modelcontextprotocol/go-sdk` 的 streamable HTTP（stateless、JSON 响应），
+只提供一个 `search_events` 工具，读 `artifactsRoot` 下的年度 JSONL。服务名和
+说明只描述「主人有哪些信息」，不要写这些信息是从什么材料里得来的；查询按
+`day`、`kinds`、`text` 过滤，返回 `occurred_at`、`day`、`kind`、`summary`。
+端点只绑本机，没有鉴权；改端口或关掉都在设置页。
 
 ## 生命周期
 

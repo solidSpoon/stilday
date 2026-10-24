@@ -36,7 +36,10 @@ func main() {
 		}
 	})
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
-	mygo.App.OnQuit(func() { close(a.stopped) })
+	mygo.App.OnQuit(func() {
+		a.mcp.stop()
+		close(a.stopped)
+	})
 	mygo.App.WhenReady(func() {
 		a.autoStart = mygo.App.OpenAtLogin()
 		// Started by the login item: run in the background, with only the
@@ -72,6 +75,7 @@ func main() {
 			a.win.Hide()
 		})
 		a.setupTray()
+		a.mcp.reload(a.cfg, mygo.App.Version())
 		a.keepScheduleTicking()
 	})
 	if err := mygo.App.Run(); err != nil {

@@ -91,7 +91,7 @@ func (a *app) collectorProgress(id, prefix string) func(stage string, done, tota
 // startCollector clears one collector's folder and runs it. auto is set
 // when this run is part of the nightly pipeline, which the status records.
 func (a *app) startCollector(p collector, auto bool) {
-	if p == nil || a.chat.dir == "" || !a.canStartWork() {
+	if p == nil || a.chat.dir == "" || !a.takeConversationSlot() {
 		return
 	}
 	day, dir := a.day, a.chat.dir
@@ -177,7 +177,7 @@ func (a *app) finishCollector(p collector, day time.Time, dir string, env collec
 
 // startAllCollectors runs every registered collector in order.
 func (a *app) startAllCollectors() {
-	if a.chat.dir == "" || !a.canStartWork() {
+	if a.chat.dir == "" || !a.takeConversationSlot() {
 		return
 	}
 	a.collectQueue = nil
@@ -204,10 +204,10 @@ func (a *app) startCollectorID(id string) {
 
 // maybeAutoCollect starts each enabled plugin at its own daily time. A
 // plugin that already started today at or after its time is left alone.
-// While a conversation or the analysis queue owns the app, the collector
-// waits for the next frame instead of taking its slot.
+// A manual conversation keeps the slot; the analysis queue yields to the
+// collection, which changes the material under it.
 func (a *app) maybeAutoCollect() {
-	if !a.cfg.configured() || !a.canStartWork() {
+	if !a.cfg.configured() || !a.canStartCollector() {
 		return
 	}
 	now := a.clockNow()

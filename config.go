@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,10 @@ type config struct {
 	// Analysis waits until every collector for the target day is done.
 	CollectTime string `json:"collect_time"`
 	AutoTime    string `json:"auto_time"`
+	// MCPEnabled serves the query endpoint other assistants connect to,
+	// and MCPPort is the localhost port it listens on.
+	MCPEnabled bool   `json:"mcp_enabled"`
+	MCPPort    string `json:"mcp_port"`
 }
 
 // defaultMaxPhotos caps one day's contact sheets; the rest of the day
@@ -109,6 +114,9 @@ func (c config) withDefaults() config {
 	}
 	c.CollectTime = normalizeClock(c.CollectTime)
 	c.AutoTime = normalizeClock(c.AutoTime)
+	if strings.TrimSpace(c.MCPPort) == "" {
+		c.MCPPort = mcpDefaultPort
+	}
 	if c.AutoTime == "" || c.AutoTime == c.CollectTime {
 		c.AutoTime = "10:00"
 	}
@@ -129,6 +137,11 @@ func (c config) validate() error {
 	}
 	if _, err := clockOn(time.Now(), c.AutoTime); err != nil {
 		return errors.New("自动分析时间要写成 HH:MM")
+	}
+	if c.MCPEnabled {
+		if n, err := strconv.Atoi(strings.TrimSpace(c.MCPPort)); err != nil || n < 1 || n > 65535 {
+			return errors.New("MCP 端口要写成 1–65535 的数字")
+		}
 	}
 	return nil
 }

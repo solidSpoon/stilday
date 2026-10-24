@@ -49,6 +49,30 @@ func TestAnalysisQueueStartPendingAppendsToRunning(t *testing.T) {
 	}
 }
 
+// A collector run stops the day and drops the queue, but keeps the pending
+// days pending so the rail recomputes them afterwards.
+func TestAnalysisQueueStopRunKeepsPending(t *testing.T) {
+	f := &queueFixture{pending: []string{"2026-10-03", "2026-10-02"}}
+	q := f.queue()
+	q.StartPending()
+	if !q.Running || q.Current != "2026-10-03" || len(q.Queue) != 1 {
+		t.Fatalf("before stop: running=%v current=%q queue=%v", q.Running, q.Current, q.Queue)
+	}
+	q.StopRun()
+	if q.Running || q.Current != "" || len(q.Queue) != 0 {
+		t.Fatalf("after stop: running=%v current=%q queue=%v", q.Running, q.Current, q.Queue)
+	}
+	if f.stopped != 1 {
+		t.Fatalf("stopped %d agents, want 1", f.stopped)
+	}
+	if len(q.Cancelled) != 0 {
+		t.Fatalf("stop cancelled days: %v", q.Cancelled)
+	}
+	if got := q.Pending(); len(got) != 2 {
+		t.Fatalf("pending after stop is %v", got)
+	}
+}
+
 func TestAnalysisQueueActionStates(t *testing.T) {
 	f := &queueFixture{pending: []string{"2026-10-03", "2026-10-02"}}
 	q := f.queue()

@@ -216,13 +216,13 @@ func TestAutoAnalyzeDoesNothingWithoutPendingDays(t *testing.T) {
 	}
 }
 
-// Manual actions share one conversation slot: a collector run, a chat turn
-// and the analysis queue each keep the other two out, so a trigger can
-// never cut into work that is already using that slot.
-func TestManualActionsShareTheConversationSlot(t *testing.T) {
+// A manual conversation keeps the conversation slot; the analysis queue
+// yields to a collector run, which changes the material under it.
+func TestCollectorRunTakesTheSlotFromTheQueue(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
 	a.openDay(a.day)
+	a.photosPlugin().value.Days = 1
 
 	a.collecting = true
 	a.sendChat("hello")
@@ -238,6 +238,7 @@ func TestManualActionsShareTheConversationSlot(t *testing.T) {
 	}
 	a.collecting = false
 
+	// A conversation keeps the slot.
 	a.chat.busy = true
 	a.runCollectorNow(photosCollectorID)
 	if a.collecting {
@@ -245,13 +246,22 @@ func TestManualActionsShareTheConversationSlot(t *testing.T) {
 	}
 	a.chat.busy = false
 
+	// The queue yields: the run stops it before collecting.
+	a.analysis.Running = true
+	a.analysis.Current = dayKey(a.day)
+	a.analysis.Queue = []string{dayKey(a.day.AddDate(0, 0, -1))}
+	a.runCollectorNow(photosCollectorID)
+	if a.analysis.Running || a.analysis.Current != "" || len(a.analysis.Queue) != 0 {
+		t.Fatalf("the queue kept going: running=%v current=%q queue=%v", a.analysis.Running, a.analysis.Current, a.analysis.Queue)
+	}
+	if len(a.analysis.Cancelled) != 0 {
+		t.Fatalf("the run cancelled days: %v", a.analysis.Cancelled)
+	}
+
+	// A manual analysis still waits for a queue that is running.
 	a.analysis.Running = true
 	if a.canStartWork() {
 		t.Fatal("work is startable while the analysis queue runs")
-	}
-	a.runCollectorNow(photosCollectorID)
-	if a.collecting {
-		t.Fatal("a collector started while the analysis queue runs")
 	}
 	a.reanalyze()
 	if a.chat.greetingPending {

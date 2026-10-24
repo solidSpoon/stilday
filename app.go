@@ -34,6 +34,9 @@ type app struct {
 	materialsShare float32
 	sidebarWide    bool
 
+	// mcp is the local query endpoint other assistants connect to.
+	mcp mcpService
+
 	// The global board, all days newest first.
 	boardEntries []Entry
 	boardItems   []boardItem
@@ -218,6 +221,33 @@ func (a *app) chatIdle() bool {
 // is the owner.
 func (a *app) canStartWork() bool {
 	return a.chatIdle() && !a.analysis.Running
+}
+
+// canStartAnalysis reports whether a batch start can run now: there is a day
+// to start, and either the queue already owns the conversation slot or it is
+// free.
+func (a *app) canStartAnalysis() bool {
+	return a.analysis.CanStart() && (a.analysis.Running || a.chatIdle())
+}
+
+// canStartCollector reports whether a collector run can take the slot: it is
+// idle, or only the analysis queue is using it, which a run stops.
+func (a *app) canStartCollector() bool {
+	return !a.collecting && (a.chatIdle() || a.analysis.Running)
+}
+
+// takeConversationSlot stops the analysis queue, whose material a collector
+// run is about to change, and reports whether the run may start. A manual
+// conversation keeps the slot.
+func (a *app) takeConversationSlot() bool {
+	if a.collecting {
+		return false
+	}
+	if a.analysis.Running {
+		a.analysis.StopRun()
+		return true
+	}
+	return a.chatIdle()
 }
 
 // selectDay switches the whole app to another day.

@@ -213,6 +213,20 @@ func (q *Queue) halt() {
 	q.Current = ""
 }
 
+// StopRun stops the day being analyzed and drops the queue without marking
+// the pending days cancelled. A collection is about to change the material,
+// so the pending list is recomputed afterwards.
+func (q *Queue) StopRun() {
+	stopping := q.Running && q.Current != ""
+	q.Running = false
+	q.Current = ""
+	q.Queue = nil
+	q.Paused = false
+	if stopping && q.hooks.Stop != nil {
+		q.hooks.Stop()
+	}
+}
+
 // pause lets the current day finish but opens no new one.
 func (q *Queue) Pause() {
 	if !q.Running && len(q.Queue) == 0 {

@@ -17,7 +17,7 @@ import (
 // is a form in one column, as a Mac's settings are.
 func (a *app) settingsPage(c *ui.Context) {
 	t := c.Theme()
-	pageShell(c, "设置", "存储、模型和 Pi", func() {
+	pageShell(c, "设置", "存储、模型、Pi 和 MCP", func() {
 		if !a.cfg.configured() {
 			glassAction(c, iconCheck, "开始使用", true, ui.Color{}, a.saveSettings)
 			return
@@ -46,7 +46,7 @@ func (a *app) settingsPage(c *ui.Context) {
 				}
 				a.modelSettings(c)
 				a.piSettings(c)
-				a.aiSettings(c)
+				a.mcpSettings(c)
 			})
 		})
 	})
@@ -302,21 +302,40 @@ func (a *app) piSettings(c *ui.Context) {
 
 func mb(n int64) float64 { return float64(n) / (1 << 20) }
 
-func (a *app) aiSettings(c *ui.Context) {
+// mcpSettings is the local query endpoint other assistants paste a URL
+// into. It offers the owner's day log, nothing else.
+func (a *app) mcpSettings(c *ui.Context) {
 	t := c.Theme()
 	group(c, func() {
-		groupTitle(c, "AI 入口")
-		if !a.cfg.configured() {
-			ui.Text(c, "保存存储目录后，这里会显示当天 JSONL 的路径。").FontSize(11).TextColor(t.TextMuted)
+		groupTitle(c, "MCP 查询")
+		ui.Text(c, "别的 AI 可以填一个网址来查主人的日常记录：做过的事、行程安排、吃喝、身体、兴趣和观察。").
+			FontSize(11).TextColor(t.TextMuted)
+		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			ui.Switch(c, &a.settingsDraft.MCPEnabled).Label("启用 MCP 查询")
+			ui.Spacer(c)
+			if a.settingsDraft.MCPEnabled {
+				ui.Text(c, "端口").FontSize(11).TextColor(t.TextMuted)
+				ui.TextInput(c, &a.settingsDraft.MCPPort).Width(70).Placeholder(mcpDefaultPort).Label("MCP 端口")
+			}
+		})
+		if !a.settingsDraft.MCPEnabled {
 			return
 		}
-		path := a.cfg.artifactPath(a.day)
-		ui.Text(c, shortenPath(path)).Font("monospace").FontSize(11).TextColor(t.Text).Selectable()
-		ui.Text(c, "一行一个 JSON 事件。任何能读文件的助手都可以从这里获得这一年的上下文。").FontSize(11).TextColor(t.TextMuted)
-		ui.Row(c).Children(func() {
-			a.copyButton(c, "复制路径", path)
-			ui.Spacer(c)
+		url := mcpURL(a.settingsDraft)
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, url).Font("monospace").FontSize(11).TextColor(t.Text).Selectable().
+				Grow(1).MinWidth(0).SingleLine()
+			a.copyButton(c, "复制地址", url)
 		})
+		if a.settingsDraft != a.cfg {
+			ui.Text(c, "保存后生效。").FontSize(11).TextColor(t.TextMuted)
+			return
+		}
+		if url, errText, running := a.mcp.status(); errText != "" {
+			ui.Text(c, "启动失败："+errText).FontSize(11).TextColor(t.Danger)
+		} else if running {
+			ui.Text(c, "正在 "+url+" 上等连接。").FontSize(11).TextColor(t.Success)
+		}
 	})
 }
 
@@ -417,6 +436,7 @@ func (a *app) saveSettings() {
 	windowChanged := c.PhotoStart != a.cfg.PhotoStart || c.PhotoEnd != a.cfg.PhotoEnd
 	a.cfg = c
 	a.store = artifact.Open(a.cfg.artifactsRoot())
+	a.mcp.reload(a.cfg, mygo.App.Version())
 	a.loadCollectorSettings()
 	a.page = pageBoard
 	a.boardDirty = true

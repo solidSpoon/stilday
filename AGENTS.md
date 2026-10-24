@@ -22,5 +22,9 @@ Developer ID 时是 ad-hoc 签名。
   不要手改 `prompts/system-prompt.md` 里由 `{{stilday_save_day_args}}` 填出来的段落。
 - `stilday_save_day` 保存的是当天日志的全量：每次调用替换当天已存的条目，所以
   模型必须每次发完整列表；空列表不会清空当天。
+- 采集、分析队列、手动动作共用一个会话槽，必须串行：入口统一用
+  `chatIdle()` / `takeConversationSlot()`。采集开始会 `analysis.StopRun()`
+  （停当前、清队列、待分析不标取消），插件执行结束统一
+  `refreshChangedDays()` 重算待分析。详见 `docs/architecture.md` 的「任务调度」。
 - 事件的 kind 只有 schema 里那六个；旧 kind 不做兼容，界面上显示灰色和原始英文。
 - 设计简单、皮实；不要为假设中的未来需求加抽象。
