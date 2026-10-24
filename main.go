@@ -25,6 +25,9 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
+	// While the window is away Stilday is a menu bar app: no Dock icon.
+	// When the window shows, it comes back as a Dock app.
+	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 	a := newApp()
 	// Closing the window leaves Stilday in the menu bar, so the day's
 	// collection and analysis still run at their times.
@@ -45,6 +48,9 @@ func main() {
 		// Started by the login item: run in the background, with only the
 		// menu bar icon.
 		hidden := mygo.App.WasOpenedAtLogin()
+		if !hidden {
+			mygo.App.SetActivationPolicy(mygo.ActivationPolicyRegular)
+		}
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "Stilday",
 			Hidden:    hidden,
@@ -70,9 +76,11 @@ func main() {
 			if a.quitting {
 				return
 			}
-			// Hide, not close: the schedule keeps running in the menu bar.
+			// Hide, not close: the schedule keeps running in the menu bar,
+			// and the Dock icon goes with the window.
 			e.PreventDefault()
 			a.win.Hide()
+			mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 		})
 		a.setupTray()
 		a.mcp.reload(a.cfg, mygo.App.Version())

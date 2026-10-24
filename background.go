@@ -89,6 +89,8 @@ func (a *app) showWindow() {
 	if a.win == nil {
 		return
 	}
+	// The window brings the Dock icon back with it.
+	mygo.App.SetActivationPolicy(mygo.ActivationPolicyRegular)
 	a.win.Show()
 	a.win.Focus()
 }
