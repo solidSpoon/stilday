@@ -15,7 +15,7 @@ func (a *app) collectorPage(c *ui.Context) {
 		return
 	}
 	t := c.Theme()
-	subtitle := "插件按各自计划采集，到点分析右侧待分析的天"
+	subtitle := "插件按各自计划采集；到点批量启动右侧待执行的任务"
 	pageShell(c, "采集器", subtitle, func() {
 		if a.settingsErr != "" {
 			ui.Text(c, a.settingsErr).FontSize(11).TextColor(t.Danger).SingleLine()
@@ -56,7 +56,7 @@ func (a *app) collectorAnalysisPlan(c *ui.Context) {
 	group(c, func() {
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			groupTitle(c, "每日分析")
-			ui.Text(c, "所有启用的插件完成后，到点分析右侧待分析的天。").
+			ui.Text(c, "到点批量启动右侧待执行的任务；没有任务就不处理，也不等采集器。").
 				FontSize(11).TextColor(t.TextMuted).Grow(1).MinWidth(0).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, "每天").FontSize(11).TextColor(t.TextMuted)
@@ -127,24 +127,13 @@ func (a *app) analysisTasks(c *ui.Context) {
 		ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
 			groupTitle(c, "分析任务")
 			ui.Spacer(c)
-			switch {
-			case a.analysis.Paused:
-				if ui.PrimaryButton(c, "继续").Clicked() {
-					a.analysis.Resume()
-				}
-			case a.analysis.Running || len(a.analysis.Queue) > 0:
-				a.taskIcon(c, iconPause, "暂停全部", "当前这天会跑完，不再开新的一天", a.analysis.Pause)
-			case len(pending) > 0:
-				if ui.PrimaryButton(c, fmt.Sprintf("分析 %d 天", len(pending))).Clicked() {
-					a.analysis.StartPending()
-				}
-			}
-			if len(pending) > 0 || a.analysis.Running || len(a.analysis.Queue) > 0 || len(a.analysis.Cancelled) > 0 {
-				a.taskIcon(c, iconRetry, "重试全部", "清掉取消状态，重新排队所有待分析的天", a.analysis.Restart)
-			}
-			if a.analysis.Running || len(a.analysis.Queue) > 0 || len(pending) > 0 {
-				a.taskIcon(c, iconStop, "停止全部", "停止当前这天并取消所有任务", a.analysis.CancelAll)
-			}
+			// Appending days to a run already in progress is safe even
+			// while it owns the conversation slot; starting a new run is
+			// not, so the same lock the manual actions use applies.
+			canStart := a.analysis.CanStart() && (a.analysis.Running || a.chatIdle())
+			glassAction(c, iconPlay, "启动所有", canStart, ui.Color{}, a.analysis.StartPending)
+			glassAction(c, iconPause, "暂停所有", a.analysis.CanPause(), ui.Color{}, a.analysis.Pause)
+			glassAction(c, iconStop, "取消所有", a.analysis.CanCancel(), ui.Color{}, a.analysis.CancelAll)
 		})
 		if !running && len(pending) == 0 && len(a.analysis.Cancelled) == 0 && len(a.analysis.Done) == 0 {
 			ui.Text(c, "没有待分析的任务。").FontSize(11.5).TextColor(t.TextMuted)
@@ -204,23 +193,6 @@ func (a *app) analysisTasks(c *ui.Context) {
 			})
 		}
 	})
-}
-
-// taskIcon is a quiet 30px icon button for the task rail, with the
-// explanation in its tooltip.
-func (a *app) taskIcon(c *ui.Context, icon *ui.SVG, label, tip string, fn func()) {
-	t := c.Theme()
-	b := ui.Box(c).Width(30).Height(30).Radius(8).Center().
-		Cursor(ui.CursorPointer).Label(label).Tooltip(tip)
-	b.Children(func() {
-		ui.Icon(c, icon).FontSize(14).TextColor(t.TextMuted)
-	})
-	if b.Hovered() {
-		b.Background(t.Background)
-	}
-	if b.Clicked() {
-		fn()
-	}
 }
 
 // analysisRow is one day in the analysis task list.
@@ -299,7 +271,7 @@ func (a *app) collectorRow(c *ui.Context, p collector) {
 			ui.TextInput(c, &s.Time).Width(80).Placeholder("21:00").Label(p.Name() + "采集时间")
 			ui.Text(c, "自动执行").FontSize(11).TextColor(t.TextMuted)
 			ui.Spacer(c)
-			if ui.PrimaryButton(c, "立即执行").Disabled(a.collecting).Clicked() {
+			if ui.PrimaryButton(c, "立即执行").Disabled(!a.canStartWork()).Clicked() {
 				a.runCollectorNow(p.ID())
 			}
 		})

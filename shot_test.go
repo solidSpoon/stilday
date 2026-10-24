@@ -157,6 +157,9 @@ func TestShots(t *testing.T) {
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-19"] = true
 	a.calendarChanged["2026-10-18"] = true
+	// Keep the daily batch start out of the shot: it would switch away
+	// from the collectors page.
+	a.autoAnalyzeDay = dayKey(a.day)
 	a.analysis.Queue = []string{"2026-10-20", "2026-10-19"}
 	a.analysis.Cancelled["2026-10-18"] = time.Now()
 	tt.Frame()

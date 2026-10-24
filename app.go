@@ -188,6 +188,25 @@ func (a *app) tick() {
 	a.maybeAutoAnalyze()
 }
 
+// The conversation has one turn slot: a Pi turn, the opening line, the
+// photo preparation and a collector run all write the same chat state
+// (busy, preparing, progress). These two predicates are the one place the
+// entry points ask whether that slot is free, so a manual action, a
+// collector and a scheduled task can never claim it twice.
+
+// chatIdle reports whether the conversation slot is free.
+func (a *app) chatIdle() bool {
+	return !a.chat.busy && !a.chat.preparing && !a.chat.greetingPending && !a.collecting
+}
+
+// canStartWork reports whether a fresh analysis or collector run may begin.
+// The analysis queue starts its own days through startAnalysis, so that
+// path asks chatIdle instead: it is allowed to run while the queue itself
+// is the owner.
+func (a *app) canStartWork() bool {
+	return a.chatIdle() && !a.analysis.Running
+}
+
 // selectDay switches the whole app to another day.
 func (a *app) selectDay(day time.Time) {
 	if !a.cfg.configured() {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+
+	"stilday/internal/analysis"
 )
 
 type fakeCollector struct {
@@ -121,6 +123,13 @@ func TestAutoCollectRunsOncePerDay(t *testing.T) {
 	a.cfg.CollectTime = "22:00"
 	a.now = time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 22, 1, 0, 0, time.Local)
 	a.page = "day"
+	// The scheduled scan waits while a conversation owns the slot.
+	a.chat.busy = true
+	a.maybeAutoCollect()
+	if a.collecting {
+		t.Fatal("auto collect started during a conversation")
+	}
+	a.chat.busy = false
 	a.maybeAutoCollect()
 	waitCollecting(t, a)
 	if run := a.collectorDay.Items["photos"]; run.Status != "done" {
@@ -136,11 +145,14 @@ func TestAutoCollectRunsOncePerDay(t *testing.T) {
 	}
 }
 
-func TestAutoAnalyzeWaitsForCollectors(t *testing.T) {
+// The daily batch start is independent of the collectors: it starts the days
+// the scan marked as changed, even when the collector's last run has not
+// settled.
+func TestAutoAnalyzeStartsMarkedDaysWithoutSettledCollectors(t *testing.T) {
 	a := newTestApp(t)
 	configureTestApp(t, a)
-	yday := a.day.AddDate(0, 0, -1)
-	a.openDay(yday)
+	day := a.day
+	a.openDay(day)
 	dir := a.chat.dir
 	if err := os.MkdirAll(filepath.Join(dir, "previews"), 0o755); err != nil {
 		t.Fatal(err)
@@ -150,22 +162,91 @@ func TestAutoAnalyzeWaitsForCollectors(t *testing.T) {
 	}
 	state := loadCollectorDay(dir)
 	state.Items = map[string]collectorRun{
-		"photos": {Status: "done", Fingerprint: "sha256:new"},
+		"photos": {Status: "running", Fingerprint: "sha256:new"},
 	}
 	if err := saveCollectorDay(dir, state); err != nil {
 		t.Fatal(err)
 	}
+	a.refreshChangedDays()
+
+	var started []string
+	a.analysis = analysis.New(analysis.Hooks{
+		Pending:  a.changedDaysSorted,
+		StartDay: func(key string) bool { started = append(started, key); return true },
+	})
+	a.cfg.AutoTime = "10:00"
+	a.now = time.Date(day.Year(), day.Month(), day.Day(), 10, 1, 0, 0, time.Local)
+	a.page = pageDay
+	// While a conversation owns the slot the batch start waits, and it
+	// does not consume the day's time.
+	a.chat.busy = true
+	a.maybeAutoAnalyze()
+	if len(started) != 0 || a.autoAnalyzeDay != "" {
+		t.Fatalf("started during a conversation: %v %q", started, a.autoAnalyzeDay)
+	}
+	a.chat.busy = false
+	a.maybeAutoAnalyze()
+	if len(started) != 1 || started[0] != dayKey(day) {
+		t.Fatalf("started days are %v", started)
+	}
+}
+
+// With nothing marked, the daily batch start leaves the app alone.
+func TestAutoAnalyzeDoesNothingWithoutPendingDays(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
 	a.cfg.AutoTime = "10:00"
 	a.now = time.Date(a.day.Year(), a.day.Month(), a.day.Day(), 10, 1, 0, 0, time.Local)
-	a.page = "day"
-	a.chat.piErr = "test"
+	a.page = pageDay
 	a.maybeAutoAnalyze()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && a.analysis.Running {
-		time.Sleep(10 * time.Millisecond)
+	if a.analysis.Running || len(a.analysis.Queue) != 0 {
+		t.Fatalf("started with nothing pending: running=%v queue=%v", a.analysis.Running, a.analysis.Queue)
 	}
-	if a.collectorDay.Items["photos"].AnalyzedFingerprint != "" {
-		t.Error("analysis succeeded without a model")
+	if a.autoAnalyzeDay != dayKey(a.day) {
+		t.Fatalf("the daily slot was not settled: %q", a.autoAnalyzeDay)
+	}
+}
+
+// Manual actions share one conversation slot: a collector run, a chat turn
+// and the analysis queue each keep the other two out, so a trigger can
+// never cut into work that is already using that slot.
+func TestManualActionsShareTheConversationSlot(t *testing.T) {
+	a := newTestApp(t)
+	configureTestApp(t, a)
+	a.openDay(a.day)
+
+	a.collecting = true
+	a.sendChat("hello")
+	if a.chat.busy || len(a.chat.messages) != 0 {
+		t.Fatal("a message was sent while a collector was running")
+	}
+	a.startAnalysis()
+	if a.chat.greetingPending {
+		t.Fatal("an analysis started while a collector was running")
+	}
+	if a.canStartWork() {
+		t.Fatal("work is startable while a collector runs")
+	}
+	a.collecting = false
+
+	a.chat.busy = true
+	a.runCollectorNow(photosCollectorID)
+	if a.collecting {
+		t.Fatal("a collector started during a conversation")
+	}
+	a.chat.busy = false
+
+	a.analysis.Running = true
+	if a.canStartWork() {
+		t.Fatal("work is startable while the analysis queue runs")
+	}
+	a.runCollectorNow(photosCollectorID)
+	if a.collecting {
+		t.Fatal("a collector started while the analysis queue runs")
+	}
+	a.reanalyze()
+	if a.chat.greetingPending {
+		t.Fatal("a manual analysis started while the queue runs")
 	}
 }
 
@@ -220,7 +301,7 @@ func TestCollectorPageShowsGlobalUI(t *testing.T) {
 	a.page = "collectors"
 	tt := ui.NewTester(a.view, 1440, 900)
 	tt.Frame()
-	for _, s := range []string{"采集器", "采集插件", "相册照片", "每日分析", "立即执行", "一天", "一周", "一个月", "三个月"} {
+	for _, s := range []string{"采集器", "采集插件", "相册照片", "每日分析", "立即执行", "一天", "一周", "一个月", "三个月", "启动所有", "暂停所有", "取消所有"} {
 		if !tt.HasText(s) {
 			t.Errorf("missing %q", s)
 		}
@@ -328,16 +409,18 @@ func TestChangedDaysUsesAnalyzedFingerprint(t *testing.T) {
 	if err := saveCollectorDay(dir, state); err != nil {
 		t.Fatal(err)
 	}
-	got := a.changedDays([]time.Time{a.day})
-	if len(got) != 1 || got[0] != a.day.Format("2006-01-02") {
-		t.Fatalf("changed days are %v", got)
+	key := dayKey(a.day)
+	a.refreshChangedDays()
+	if !a.calendarChanged[key] {
+		t.Fatalf("changed day is not pending: %v", a.calendarChanged)
 	}
 	state.Items["photos"] = collectorRun{Status: "done", Fingerprint: "sha256:abc", AnalyzedFingerprint: "sha256:abc"}
 	if err := saveCollectorDay(dir, state); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.changedDays([]time.Time{a.day}); len(got) != 0 {
-		t.Fatalf("unchanged day is still queued: %v", got)
+	a.refreshChangedDays()
+	if a.calendarChanged[key] {
+		t.Fatal("an analyzed day is still pending")
 	}
 }
 
@@ -410,6 +493,9 @@ func TestCollectorAnalysisTasks(t *testing.T) {
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-21"] = true
 	a.analysis.Queue = []string{"2026-10-21"}
+	// The rail is what this test looks at; the daily batch start has
+	// already had its slot today.
+	a.autoAnalyzeDay = dayKey(a.day)
 	a.page = "collectors"
 	tt := ui.NewTester(a.view, 1440, 900)
 	tt.Frame()

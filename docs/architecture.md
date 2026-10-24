@@ -56,14 +56,21 @@ stilday/
    重新分析走 `restartConversation` + `clearDayAnalysis`。不要再手写一串
    字段清零——之前三处拷贝已经开始漂移。
 5. **分析队列是状态机。** UI 只读 `a.analysis` 的字段和调用
-   `Pending/StartPending/Pause/Resume/Restart/CancelAll/Finish`；`Running`、
-   `Current`、`Queue` 的迁移只发生在 `internal/analysis`。
+   `Pending/CanStart/CanPause/CanCancel/StartPending/Pause/CancelAll/Finish`；
+   `Running`、`Current`、`Queue` 的迁移只发生在 `internal/analysis`。采集器
+   只更新指纹并刷新待分析列表，不写队列；到点批量启动直接 `StartPending`，
+   两边没有先后依赖。
 6. **产物行只由 `entryRecord` 编解码。** 写入用 `encoding/json`（关闭 HTML
    转义）；`ts`、`data.summary` 只作为读兼容存在。不要再手拼 JSON。
 7. **路径只由少数函数拼。** `config.workDayDir` / `config.artifactPath` /
    `artifactFile` 是存储布局的唯一来源；日期键统一 `dayFormat`（`dayKey` /
    `parseDayKey`）。
 8. **页面身份用 `pageID` 常量**，不要比较字符串字面量。
+9. **会话只有一个执行槽。** `chat.busy`、`chat.preparing`、
+   `chat.greetingPending`、`collecting` 共用这个槽；手动发消息、手动分析、
+   立即执行采集、定时采集、定时分析和「启动所有」都先问 `chatIdle()` /
+   `canStartWork()`，不要在入口各写一套条件。分析队列自己的 `startAnalysis`
+   只看 `chatIdle()`，因为它就是槽的持有者。
 
 ## 数据流
 

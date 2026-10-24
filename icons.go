@@ -31,7 +31,6 @@ var (
 	iconStop      = svgIcon(`<rect x="6" y="6" width="12" height="12" rx="2.5"/>`)
 	iconPause     = svgIcon(`<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>`)
 	iconPlay      = svgIcon(`<path d="M8 5v14l11-7L8 5Z"/>`)
-	iconRetry     = svgIcon(`<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/>`)
 	iconCheck     = svgIcon(`<path d="m5 12 5 5L20 7"/>`)
 	iconInfo      = svgIcon(`<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.5" r=".8"/>`)
 	iconPerson    = svgIcon(`<circle cx="12" cy="8" r="4" fill="currentColor" stroke="none"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8Z" fill="currentColor" stroke="none"/>`)

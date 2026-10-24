@@ -36,8 +36,11 @@ func (a *app) composer(c *ui.Context) {
 			if fresh {
 				label = "分析这一天"
 			}
-			canAnalyze := !a.chat.busy && !a.chat.preparing
+			canAnalyze := a.canStartWork()
 			glassAction(c, iconAI, label, canAnalyze, ui.Color{}, func() {
+				if !a.canStartWork() {
+					return
+				}
 				if fresh {
 					a.startAnalysis()
 					return
@@ -57,7 +60,7 @@ func (a *app) composer(c *ui.Context) {
 					if k.Key != ui.KeyEnter || k.Mods != 0 {
 						return false
 					}
-					if a.chat.busy || a.chat.preparing || a.chat.greetingPending {
+					if !a.chatIdle() {
 						return true
 					}
 					a.sendChat(k.Text())
@@ -70,7 +73,7 @@ func (a *app) composer(c *ui.Context) {
 					a.stopAgent()
 				})
 			} else {
-				canSend := strings.TrimSpace(a.chat.input) != "" && !a.chat.preparing && !a.chat.greetingPending
+				canSend := strings.TrimSpace(a.chat.input) != "" && a.chatIdle()
 				glassAction(c, iconSend, "发送", canSend, t.Accent, func() {
 					a.sendChat(a.chat.input)
 				})
@@ -86,7 +89,7 @@ func (a *app) composer(c *ui.Context) {
 // message, and sends the prompt.
 func (a *app) sendChat(text string) {
 	text = strings.TrimSpace(text)
-	if text == "" || a.chat.busy || a.chat.preparing || a.collecting || a.chat.greetingPending {
+	if text == "" || !a.chatIdle() {
 		return
 	}
 	if !a.cfg.configured() {

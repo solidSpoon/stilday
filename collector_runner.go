@@ -83,7 +83,7 @@ func (a *app) collectorProgress(id, prefix string) func(stage string, done, tota
 // startCollector clears one collector's folder and runs it. auto is set
 // when this run is part of the nightly pipeline, which the status records.
 func (a *app) startCollector(p collector, auto bool) {
-	if a.collecting || p == nil || a.chat.dir == "" {
+	if p == nil || a.chat.dir == "" || !a.canStartWork() {
 		return
 	}
 	day, dir := a.day, a.chat.dir
@@ -166,7 +166,7 @@ func (a *app) finishCollector(p collector, day time.Time, dir string, err error)
 
 // startAllCollectors runs every registered collector in order.
 func (a *app) startAllCollectors() {
-	if a.collecting || a.chat.dir == "" {
+	if a.chat.dir == "" || !a.canStartWork() {
 		return
 	}
 	a.collectQueue = nil
@@ -210,8 +210,10 @@ func (a *app) collectorSchedule(id string) *collectorSchedule {
 
 // maybeAutoCollect starts each enabled plugin at its own daily time. A
 // plugin that already started today at or after its time is left alone.
+// While a conversation or the analysis queue owns the app, the collector
+// waits for the next frame instead of taking its slot.
 func (a *app) maybeAutoCollect() {
-	if !a.cfg.configured() || a.collecting || a.analysis.Running {
+	if !a.cfg.configured() || !a.canStartWork() {
 		return
 	}
 	now := a.clockNow()
@@ -256,11 +258,12 @@ func startedAfter(run collectorRun, at time.Time) bool {
 	return err == nil && !started.Before(at)
 }
 
-// maybeAutoAnalyze runs the days shown in the task rail once the daily
-// analysis time arrives. Only days whose enabled collectors have settled
-// are eligible.
+// maybeAutoAnalyze starts every pending day once the daily analysis time
+// arrives. It does not wait for the collectors: the scan only marks the
+// days it changed, and this task starts whatever is marked. With nothing
+// marked it does nothing and tries again the next day.
 func (a *app) maybeAutoAnalyze() {
-	if !a.cfg.configured() || a.collecting || a.analysis.Running || a.analysis.Paused {
+	if !a.cfg.configured() || a.analysis.Running || a.analysis.Paused {
 		return
 	}
 	now := a.clockNow()
@@ -273,66 +276,14 @@ func (a *app) maybeAutoAnalyze() {
 	if a.autoAnalyzeDay == key {
 		return
 	}
-	var queue []string
-	for _, key := range a.analysis.Pending() {
-		day, err := parseDayKey(key)
-		if err != nil {
-			continue
-		}
-		if !a.allCollectorsSettled(a.cfg.workDayDir(day)) {
-			continue
-		}
-		queue = append(queue, key)
-	}
-	a.autoAnalyzeDay = key
-	if len(queue) == 0 {
+	// A collector or a manual conversation owns the conversation slot while
+	// it runs. Wait for it instead of starting in the middle and missing
+	// the slot; this is a runtime lock, not a scheduling dependency.
+	if !a.chatIdle() {
 		return
 	}
-	a.analysis.Start(queue, true)
-}
-
-func (a *app) allCollectorsSettled(dir string) bool {
-	if !dayHasCollectorFiles(a.collectorList, dir) {
-		return false
-	}
-	state := loadCollectorDay(dir)
-	for _, p := range a.collectorList {
-		if !a.collectorSchedule(p.ID()).Enabled {
-			continue
-		}
-		run, ok := state.Items[p.ID()]
-		if !ok || run.Status != "done" {
-			return false
-		}
-	}
-	return true
-}
-
-// changedDays returns the recent days whose current fingerprints have not
-// been analyzed. Unchanged days are skipped, so the nightly model calls are
-// only for the days that actually changed.
-func (a *app) changedDays(days []time.Time) []string {
-	return changedDaysAmong(a.cfg, a.collectorList, days)
-}
-
-// changedDaysAmong is changedDays with its config passed in, for a worker
-// that must not read the app.
-func changedDaysAmong(cfg config, collectors []collector, days []time.Time) []string {
-	var out []string
-	for _, day := range days {
-		dir := cfg.workDayDir(day)
-		if !dayHasCollectorFiles(collectors, dir) {
-			continue
-		}
-		state := loadCollectorDay(dir)
-		for _, p := range collectors {
-			if state.Items[p.ID()].pendingAnalysis() {
-				out = append(out, dayKey(day))
-				break
-			}
-		}
-	}
-	return out
+	a.autoAnalyzeDay = key
+	a.analysis.StartPending()
 }
 
 // markAutoDay records that the nightly pipeline ran, so opening the app

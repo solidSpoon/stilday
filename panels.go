@@ -202,7 +202,7 @@ func (a *app) compactEventCard(c *ui.Context, e Entry, focus bool, bg ui.Color) 
 
 // startAnalysis asks the model to look at the day and write events.
 func (a *app) startAnalysis() {
-	if a.chat.busy || a.chat.preparing || a.collecting || a.chat.greetingPending {
+	if !a.chatIdle() {
 		return
 	}
 	if a.chat.piErr != "" {
@@ -287,6 +287,11 @@ func (a *app) confirmReanalyze() {
 }
 
 func (a *app) reanalyze() {
+	// The confirmation dialog can sit open while the app gets busy, so
+	// ask the same condition again before deleting the old analysis.
+	if !a.canStartWork() {
+		return
+	}
 	a.startAnalysis()
 }
 

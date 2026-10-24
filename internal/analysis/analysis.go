@@ -43,7 +43,6 @@ type Queue struct {
 	Current string
 	Running bool
 	Paused  bool
-	Auto    bool
 	// Cancelled remembers this session's cancellations, by day.
 	Cancelled map[string]time.Time
 	// Done is the recent history the task rail shows.
@@ -113,41 +112,68 @@ func (q *Queue) Restore(key string) {
 	delete(q.Cancelled, key)
 }
 
-// startPending queues every pending day and drains the queue.
+// StartPending queues every pending day and drains the queue. A run already
+// in progress keeps its current day and takes the remaining days behind it.
 func (q *Queue) StartPending() {
-	if q.Running {
-		return
-	}
 	q.Paused = false
 	pending := q.Pending()
+	if q.Running {
+		queued := make(map[string]bool, len(q.Queue)+1)
+		queued[q.Current] = true
+		for _, key := range q.Queue {
+			queued[key] = true
+		}
+		for _, key := range pending {
+			if !queued[key] {
+				q.Queue = append(q.Queue, key)
+			}
+		}
+		return
+	}
 	if len(pending) == 0 {
 		return
 	}
 	q.Queue = pending
-	q.run(false)
+	q.run()
 }
 
-// SetQueue replaces the waiting days without starting them. The nightly
-// collector uses it to show the fresh pending days.
-func (q *Queue) SetQueue(days []string) {
-	q.Queue = days
-}
-
-// Start queues explicit days and drains them, unless a run is in progress.
-func (q *Queue) Start(days []string, auto bool) {
-	if len(days) == 0 {
-		return
+// CanStart reports whether StartPending has a day to start. The day being
+// analyzed and the days already waiting behind it do not count; a paused
+// run does, because starting all continues it.
+func (q *Queue) CanStart() bool {
+	if q.Paused && (q.Running || len(q.Queue) > 0) {
+		return true
 	}
-	q.Queue = days
-	q.run(auto)
+	pending := q.Pending()
+	if !q.Running {
+		return len(pending) > 0
+	}
+	queued := make(map[string]bool, len(q.Queue))
+	for _, key := range q.Queue {
+		queued[key] = true
+	}
+	for _, key := range pending {
+		if key != q.Current && !queued[key] {
+			return true
+		}
+	}
+	return false
+}
+
+// CanPause reports whether a run is in progress to pause.
+func (q *Queue) CanPause() bool { return q.Running && !q.Paused }
+
+// CanCancel reports whether there is anything left to cancel: a running
+// day, a waiting queue, or days pending analysis.
+func (q *Queue) CanCancel() bool {
+	return q.Running || len(q.Queue) > 0 || len(q.Pending()) > 0
 }
 
 // run drains the days already queued, one at a time.
-func (q *Queue) run(auto bool) {
+func (q *Queue) run() {
 	if q.Running || len(q.Queue) == 0 {
 		return
 	}
-	q.Auto = auto
 	q.Running = true
 	q.next()
 }
@@ -180,11 +206,10 @@ func (q *Queue) next() {
 	}
 }
 
-// halt ends the run without touching the remaining queue. Resume or
-// restart picks it up again.
+// halt ends the run without touching the remaining queue. StartPending
+// picks the pending days up again.
 func (q *Queue) halt() {
 	q.Running = false
-	q.Auto = false
 	q.Current = ""
 }
 
@@ -196,48 +221,13 @@ func (q *Queue) Pause() {
 	q.Paused = true
 }
 
-// resume continues a paused queue, or starts the pending days when no
-// queue is left.
-func (q *Queue) Resume() {
-	q.Paused = false
-	if q.Running {
-		return
-	}
-	if len(q.Queue) > 0 {
-		q.run(q.Auto)
-		return
-	}
-	q.StartPending()
-}
-
-// restart clears cancellations and queues every pending day. A running day
-// is allowed to finish; the reset queue starts right after it.
-func (q *Queue) Restart() {
-	q.Paused = false
-	q.Cancelled = map[string]time.Time{}
-	pending := q.Pending()
-	if q.Running {
-		out := make([]string, 0, len(pending))
-		for _, key := range pending {
-			if key != q.Current {
-				out = append(out, key)
-			}
-		}
-		q.Queue = out
-		return
-	}
-	if len(pending) == 0 {
-		return
-	}
-	q.Queue = pending
-	q.run(false)
-}
-
 // cancelAll cancels every pending and queued day and stops the running one.
-// The cancelled days stay listed, with their per-day Restore action.
+// The cancelled days stay listed, with their per-day Restore action. It is
+// not a pause: the next day's batch start still runs what gets marked then.
 func (q *Queue) CancelAll() {
 	days := q.Pending()
 	days = append(days, q.Queue...)
+	stopping := q.Running && q.Current != ""
 	if q.Current != "" {
 		days = append(days, q.Current)
 		q.halt()
@@ -246,8 +236,10 @@ func (q *Queue) CancelAll() {
 		q.Cancel(key)
 	}
 	q.Queue = nil
-	q.Paused = true
-	if q.hooks.Stop != nil {
+	q.Paused = false
+	// Only abort the agent when this queue was driving it: a manual
+	// conversation may be using it while the queue just has waiting days.
+	if stopping && q.hooks.Stop != nil {
 		q.hooks.Stop()
 	}
 }

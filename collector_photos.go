@@ -97,7 +97,7 @@ func (a *app) runCollectorNow(id string) {
 // days. Only disk work and the plugin run happen off the UI thread; the
 // state the views read is published in one step at the end.
 func (a *app) syncRecentPhotoDays(auto bool) {
-	if a.collecting || !a.cfg.configured() {
+	if !a.cfg.configured() || !a.canStartWork() {
 		return
 	}
 	p := a.collectorByID(photosCollectorID)
@@ -116,12 +116,10 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 	a.beginCollection(photosCollectorID, "准备同步…")
 
 	sync := func() {
-		var dayList []time.Time
 		var selected collectorDay
 		var saveErr error
 		for i := 0; i < days; i++ {
 			day := today.AddDate(0, 0, -i)
-			dayList = append(dayList, day)
 			dir := cfg.workDayDir(day)
 			state := loadCollectorDay(dir)
 			run := state.Items[p.ID()]
@@ -166,13 +164,14 @@ func (a *app) syncRecentPhotoDays(auto bool) {
 				selected = state
 			}
 		}
-		queue := changedDaysAmong(cfg, collectors, dayList)
+		// The scan only marks what changed: refreshChangedDays publishes
+		// the pending days the task rail lists. It does not touch the
+		// analysis queue, which may be running.
 		publish := func() {
 			a.finishCollection()
 			if saveErr != nil {
 				a.chat.err = "保存采集状态：" + saveErr.Error()
 			}
-			a.analysis.SetQueue(a.analysis.FilterCancelled(queue))
 			if selectedDir != "" && selectedDir == a.chat.dir {
 				a.collectorDay = selected
 				a.reloadMaterials(selectedDir)
