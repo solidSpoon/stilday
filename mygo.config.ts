@@ -6,7 +6,7 @@ const dev = process.env.STILDAY_DEV === "1";
 export default {
 	name: dev ? "Stilday Dev" : "Stilday",
 	identifier: dev ? "com.example.stilday.dev" : "com.example.stilday",
-	version: "0.4.0",
+	version: "0.4.1",
 	out: dev ? ".mygo/dev" : "build",
 	...(dev ? { icon: "resources/icon-dev.png" } : {}),
 };

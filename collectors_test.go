@@ -357,11 +357,13 @@ func TestCollectorPageShowsGlobalUI(t *testing.T) {
 	if tt.HasText("保存设置") {
 		t.Error("the collector page still has a Save button")
 	}
-	// The range saves itself; there is no Save button to press.
+	// The range is a draft until the card's Save is pressed.
 	if err := tt.Click("一个月"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
+	// Both cards have a 保存 pill; the plugin's is the second one.
+	a.savePluginDraft(a.photosPlugin())
 	if got := a.photosPlugin().value.Days; got != 30 {
 		t.Fatalf("the range did not save: %d", got)
 	}
@@ -541,6 +543,9 @@ func TestCollectorAnalysisTasks(t *testing.T) {
 	configureTestApp(t, a)
 	a.now = time.Now()
 	a.cfg.AutoTime = "10:00"
+	// Near 10:00 the analysis job's catch-up would release these days
+	// underneath the test; it only wants them pending.
+	a.cfg.AutoOff = true
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-21"] = true
 	a.syncAnalysisTasks()
@@ -597,6 +602,7 @@ func TestAnalysisStatusInSidebar(t *testing.T) {
 	configureTestApp(t, a)
 	a.now = time.Now()
 	a.cfg.AutoTime = "10:00"
+	a.cfg.AutoOff = true
 	a.calendarChanged["2026-10-20"] = true
 	a.calendarChanged["2026-10-19"] = true
 	a.syncAnalysisTasks()
@@ -700,6 +706,7 @@ func TestCollectorKeepRemovedSwitch(t *testing.T) {
 	if a.photosPlugin().value.KeepRemoved {
 		t.Fatal("clicking the switch did not turn it off")
 	}
+	a.savePluginDraft(a.photosPlugin())
 	again := newPhotosCollector()
 	if err := again.LoadSettings(a.cfg.storageRoot()); err != nil {
 		t.Fatal(err)

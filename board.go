@@ -102,7 +102,7 @@ func (a *app) boardEventCard(c *ui.Context, e Entry) ui.Element {
 	t := c.Theme()
 	color := kindColor(e.Kind, t)
 	card := ui.Row(c).Gap(14).Padding(16, 18).Radius(12).
-		Background(t.Surface).AlignItems(ui.Start).
+		Background(t.Surface).AlignItems(ui.Stretch).
 		Cursor(ui.CursorPointer)
 	card.Children(func() {
 		ui.Column(c).Width(44).Gap(3).Children(func() {
@@ -111,7 +111,9 @@ func (a *app) boardEventCard(c *ui.Context, e Entry) ui.Element {
 				ui.Text(c, e.OccurredAt.Format("01-02")).Font("monospace").FontSize(10).TextColor(t.TextMuted)
 			}
 		})
-		ui.Box(c).Width(3).Height(26).Radius(2).Background(color)
+		// The kind's colour runs the card's full height, not a stub beside
+		// the badge.
+		ui.Box(c).Width(3).FillHeight().Radius(2).Background(color)
 		ui.Column(c).Gap(7).Grow(1).MinWidth(0).Children(func() {
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, kindLabel(e.Kind)).FontSize(10).Bold().TextColor(color).

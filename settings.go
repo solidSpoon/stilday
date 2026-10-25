@@ -21,21 +21,21 @@ func (a *app) settingsPage(c *ui.Context) {
 	t := c.Theme()
 	pageShell(c, "设置", "存储、模型、Pi 和 MCP", func() {
 		if !a.cfg.configured() {
-			glassAction(c, iconCheck, "开始使用", true, ui.Color{}, a.saveSettings)
+			glassPill(c, iconCheck, "开始使用", t.Accent, true, a.saveSettings)
 			return
 		}
-		if a.settingsDirty() {
-			glassAction(c, iconCheck, "保存设置", true, ui.Color{}, a.saveSettings)
-		}
+		// The pill is always there, so the toolbar never changes size; it
+		// is tinted and clickable only when something is unsaved.
+		glassPill(c, iconCheck, "保存", t.Accent, a.settingsDirty(), a.saveSettings)
 	}, func() {
 		ui.Row(c).Grow(1).Justify(ui.Center).Children(func() {
 			ui.Scroll(c).FillHeight().WidthPercent(100).MaxWidth(720).
 				Padding(barHeight+24, 28, 36).ScrollbarInsets(barHeight+8, 0, 0).Gap(24).Children(func() {
-				if a.settingsErr != "" {
-					ui.Row(c).Padding(10, 12).Radius(8).Background(t.Danger.Alpha(0.08)).Children(func() {
+				ui.Row(c).Height(18).Children(func() {
+					if a.settingsErr != "" {
 						ui.Text(c, a.settingsErr).FontSize(12).TextColor(t.Danger).Selectable()
-					})
-				}
+					}
+				})
 				if a.cfgErr != nil {
 					errorRow(c, "配置文件读取失败："+a.cfgErr.Error())
 				}
@@ -61,8 +61,7 @@ func (a *app) launchSettings(c *ui.Context) {
 	group(c, func() {
 		groupTitle(c, "启动与后台")
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-			sw := ui.Switch(c, &a.autoStart).Label("开机自动启动")
-			sw.OnClick(func() { a.setOpenAtLogin(a.autoStart) })
+			ui.Switch(c, &a.autoStartDraft).Label("开机自动启动")
 			ui.Column(c).Gap(3).Grow(1).MinWidth(0).Children(func() {
 				ui.Text(c, "登录时在后台启动，只在菜单栏留一个图标。").FontSize(11).TextColor(t.TextMuted)
 				ui.Text(c, "关掉窗口不会退出：到点照常采集和分析，点菜单栏或 Dock 图标回来。").FontSize(11).TextColor(t.TextMuted)
@@ -148,33 +147,17 @@ func (a *app) modelSettings(c *ui.Context) {
 			ui.Field(c, "API key", func() {
 				keyField := ui.TextInput(c, &a.keyDraft).Password().
 					Placeholder("留空保留已保存的 key").Grow(1).Label("API key")
-				if keyField.Changed() {
-					a.scheduleKeySave()
-				}
 				if keyField.Submitted() {
 					a.saveKeyDraft()
 				}
 			})
 		})
 		ui.Text(c, spec.KeyHint+"。密钥保存在 macOS Keychain，不写进配置文件。").FontSize(11).TextColor(t.TextMuted)
-		if a.keySaved {
-			ui.Text(c, "API key 已保存到 Keychain。").FontSize(11).TextColor(t.Success)
-		}
-	})
-}
-
-// scheduleKeySave debounces the key field: the key is written to Keychain
-// shortly after the last keystroke, so the field no longer depends on the
-// dirty-only save check.
-func (a *app) scheduleKeySave() {
-	if a.keySaveTimer != nil {
-		a.keySaveTimer.Stop()
-	}
-	a.keySaveTimer = time.AfterFunc(600*time.Millisecond, func() {
-		if a.win == nil {
-			return
-		}
-		a.win.Update(func() { a.saveKeyDraft() })
+		ui.Row(c).Height(16).Children(func() {
+			if a.keySaved {
+				ui.Text(c, "API key 已保存到 Keychain。").FontSize(11).TextColor(t.Success)
+			}
+		})
 	})
 }
 
@@ -329,6 +312,7 @@ func mb(n int64) float64 { return float64(n) / (1 << 20) }
 // into. It offers the owner's day log, nothing else.
 func (a *app) mcpSettings(c *ui.Context) {
 	t := c.Theme()
+	on := a.settingsDraft.MCPEnabled
 	group(c, func() {
 		groupTitle(c, "MCP 查询")
 		ui.Text(c, "别的 AI 可以填一个网址来查主人的日常记录：做过的事、行程安排、吃喝、身体、兴趣和观察。").
@@ -336,29 +320,37 @@ func (a *app) mcpSettings(c *ui.Context) {
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Switch(c, &a.settingsDraft.MCPEnabled).Label("启用 MCP 查询")
 			ui.Spacer(c)
-			if a.settingsDraft.MCPEnabled {
-				ui.Text(c, "端口").FontSize(11).TextColor(t.TextMuted)
-				ui.TextInput(c, &a.settingsDraft.MCPPort).Width(70).Placeholder(mcpDefaultPort).Label("MCP 端口")
+			ui.Text(c, "端口").FontSize(11).TextColor(t.TextMuted)
+			port := ui.TextInput(c, &a.settingsDraft.MCPPort).Width(70).Placeholder(mcpDefaultPort).Label("MCP 端口")
+			if !on {
+				port.Opacity(0.4)
 			}
 		})
-		if !a.settingsDraft.MCPEnabled {
-			return
-		}
+		// The address and its status keep their rows whether MCP is on or
+		// not, so the card never changes height.
 		url := mcpURL(a.settingsDraft)
+		color := t.Text
+		if !on {
+			color = t.TextMuted.Alpha(0.6)
+		}
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, url).Font("monospace").FontSize(11).TextColor(t.Text).Selectable().
+			ui.Text(c, url).Font("monospace").FontSize(11).TextColor(color).Selectable().
 				Grow(1).MinWidth(0).SingleLine()
 			a.copyButton(c, "复制地址", url)
 		})
+		status, statusColor := "", t.TextMuted
 		if !configEqual(a.settingsDraft, a.cfg) {
-			ui.Text(c, "保存后生效。").FontSize(11).TextColor(t.TextMuted)
-			return
-		}
-		if url, errText, running := a.mcp.status(); errText != "" {
-			ui.Text(c, "启动失败："+errText).FontSize(11).TextColor(t.Danger)
+			status = "保存后生效。"
+		} else if url, errText, running := a.mcp.status(); errText != "" {
+			status, statusColor = "启动失败："+errText, t.Danger
 		} else if running {
-			ui.Text(c, "正在 "+url+" 上等连接。").FontSize(11).TextColor(t.Success)
+			status, statusColor = "正在 "+url+" 上等连接。", t.Success
 		}
+		ui.Row(c).Height(18).Children(func() {
+			if status != "" {
+				ui.Text(c, status).FontSize(11).TextColor(statusColor)
+			}
+		})
 	})
 }
 
@@ -398,7 +390,8 @@ func (a *app) copyButton(c *ui.Context, idle, text string) {
 // settingsDirty reports whether the page holds changes that are not in the
 // saved configuration yet.
 func (a *app) settingsDirty() bool {
-	return strings.TrimSpace(a.keyDraft) != "" || !configEqual(a.settingsDraft, a.cfg)
+	return strings.TrimSpace(a.keyDraft) != "" || a.autoStartDraft != a.autoStart ||
+		!configEqual(a.settingsDraft, a.cfg)
 }
 
 // configEqual compares configurations, including the day list.
@@ -412,13 +405,10 @@ func (a *app) openSettings() {
 		return
 	}
 	a.settingsDraft = a.cfg.withDefaults()
+	a.autoStartDraft = a.autoStart
 	a.catchUpDraft = strconv.Itoa(a.settingsDraft.CatchUpMinutes)
 	if a.settingsDraft.StorageDir == "" {
 		a.settingsDraft.StorageDir = suggestStorageDir()
-	}
-	if a.keySaveTimer != nil {
-		a.keySaveTimer.Stop()
-		a.keySaveTimer = nil
 	}
 	a.settingsErr = ""
 	a.keyDraft = ""
@@ -437,6 +427,7 @@ func (a *app) hasProviderKey() bool {
 // saveSettings writes the draft, creates the storage trees, and opens the
 // selected day again.
 func (a *app) saveSettings() {
+	firstRun := !a.cfg.configured()
 	c := a.settingsDraft
 	c.StorageDir = strings.TrimSpace(c.StorageDir)
 	c.Model = strings.TrimSpace(c.Model)
@@ -461,15 +452,29 @@ func (a *app) saveSettings() {
 		a.settingsErr = err.Error()
 		return
 	}
+	if a.autoStartDraft != a.autoStart {
+		a.setOpenAtLogin(a.autoStartDraft)
+		if a.settingsErr != "" {
+			return
+		}
+	}
 	storageChanged := c.storageRoot() != a.cfg.storageRoot()
 	windowChanged := c.PhotoStart != a.cfg.PhotoStart || c.PhotoEnd != a.cfg.PhotoEnd
 	a.cfg = c
 	a.store = artifact.Open(a.cfg.artifactsRoot())
 	a.mcp.reload(a.cfg, mygo.App.Version())
 	a.loadCollectorSettings()
-	a.page = pageBoard
 	a.boardDirty = true
 	a.settingsErr = ""
+	if firstRun {
+		// The first setup has nowhere else to be: open the board.
+		a.page = pageBoard
+	}
+	// Later saves stay on the settings page; the drafts start again from
+	// what was just written, so the save pill goes quiet.
+	a.settingsDraft = a.cfg.withDefaults()
+	a.autoStartDraft = a.autoStart
+	a.catchUpDraft = strconv.Itoa(a.settingsDraft.CatchUpMinutes)
 	a.resetAllDays()
 	a.chat = a.dayState(a.day)
 	a.chat.forcePrep = storageChanged || windowChanged

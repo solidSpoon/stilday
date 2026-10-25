@@ -124,6 +124,34 @@ func dot(c *ui.Context, color ui.Color, size float32) ui.Element {
 	return ui.Box(c).Size(size, size).Radius(size / 2).Background(color)
 }
 
+// glassPill is a Liquid Glass control with an icon and a label: tinted for
+// a primary action, as a save is. A disabled pill keeps its size and place,
+// so turning a page dirty never moves the layout.
+func glassPill(c *ui.Context, icon *ui.SVG, label string, tint ui.Color, enabled bool, action func()) ui.Element {
+	t := c.Theme()
+	g := glass.Glass{Interactive: enabled}
+	fg := t.Text
+	if enabled && tint.A > 0 {
+		g.Tint = tint
+		fg = t.AccentText
+	}
+	b := ui.Row(c).Gap(6).Padding(6, 14).Radius(999).AlignItems(ui.Center).
+		Material(g).Label(label).Tooltip(label)
+	if enabled {
+		b.Cursor(ui.CursorPointer)
+	} else {
+		b.Cursor(ui.CursorDefault).Opacity(0.4)
+	}
+	b.Children(func() {
+		ui.Icon(c, icon).FontSize(13).TextColor(fg)
+		ui.Text(c, label).FontSize(12).Bold().TextColor(fg)
+	})
+	if enabled && b.Clicked() {
+		action()
+	}
+	return b
+}
+
 // glassAction is a round control of Liquid Glass, as Messages draws the
 // buttons on either side of its composer.
 func glassAction(c *ui.Context, icon *ui.SVG, label string, enabled bool, tint ui.Color, action func()) ui.Element {

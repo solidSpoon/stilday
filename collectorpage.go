@@ -19,6 +19,9 @@ func (a *app) collectorPage(c *ui.Context) {
 		return
 	}
 	t := c.Theme()
+	if !a.autoDraftReady {
+		a.initCollectorDrafts()
+	}
 	subtitle := "每天定时采集、分析；右边是执行队列"
 	pageShell(c, "任务", subtitle, func() {
 		if a.settingsErr != "" {
@@ -33,18 +36,6 @@ func (a *app) collectorPage(c *ui.Context) {
 			})
 			a.collectorSidebar(c)
 		})
-		for _, p := range a.collectorList {
-			if p.SettingsChanged() {
-				a.collectorSettingsDirty = true
-			}
-		}
-		switch {
-		case a.win == nil:
-			// No frame loop (tests): persist now so the result is visible.
-			a.flushCollectorPage()
-		case a.collectorAppDirty || a.collectorSettingsDirty:
-			a.scheduleCollectorFlush()
-		}
 	})
 }
 
@@ -60,32 +51,24 @@ func (a *app) collectorAnalysisPlan(c *ui.Context) {
 				ui.Text(c, "到点把待分析的日期交给 AI；没有任务就不处理，也不等采集器。").
 					FontSize(11).TextColor(t.TextMuted).LineHeight(1.4)
 			})
-			on := !a.cfg.AutoOff
-			ui.Switch(c, &on).Label("启用每日分析")
-			if on != !a.cfg.AutoOff {
-				a.cfg.AutoOff = !on
-				a.collectorAppDirty = true
-				if s := a.scheduler(); s != nil {
-					s.Hold(a.cfg.AutoOff)
-				}
-			}
+			ui.Switch(c, &a.autoDraftOn).Label("启用每日分析")
 		})
 		ui.Divider(c)
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "执行日期").FontSize(11).TextColor(t.TextMuted).Width(76)
-			if scheduleDays(c, "每日分析执行日期", &a.cfg.AutoDays, &a.cfg.AutoCustom) {
-				a.collectorAppDirty = true
-			}
+			scheduleDays(c, "每日分析执行日期", &a.autoDraftDays, &a.autoDraftCustom)
 		})
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "执行时间").FontSize(11).TextColor(t.TextMuted).Width(76)
-			if scheduleTimes(c, &a.cfg.AutoTime, &a.cfg.AutoTimes) {
-				a.collectorAppDirty = true
-			}
+			scheduleTimes(c, &a.autoDraftTime, &a.autoDraftTimes)
 			ui.Spacer(c)
 			if ui.PrimaryButton(c, "立即触发").Clicked() {
 				a.startAnalysisNow()
 			}
+		})
+		ui.Row(c).Children(func() {
+			ui.Spacer(c)
+			glassPill(c, iconCheck, "保存", t.Accent, a.analysisDraftDirty(), a.saveAnalysisDraft)
 		})
 	})
 }
@@ -499,11 +482,13 @@ func (a *app) railDo(it railItem, act railAction) {
 // on top, the time row, then the plugin's own settings.
 func (a *app) collectorRow(c *ui.Context, p collector) {
 	t := c.Theme()
-	ui.Column(c).Gap(12).Children(func() {
-		s := p.Schedule()
-		if s == nil {
-			s = &collectorSchedule{}
+	d, ok := a.pluginDrafts[p.ID()]
+	if !ok {
+		if s := p.Schedule(); s != nil {
+			d = *s
 		}
+	}
+	ui.Column(c).Gap(12).Children(func() {
 		ui.Row(c).Gap(12).AlignItems(ui.Start).Children(func() {
 			ui.Icon(c, p.Icon()).FontSize(20).TextColor(t.Accent)
 			ui.Column(c).Gap(3).Grow(1).MinWidth(0).Children(func() {
@@ -521,22 +506,28 @@ func (a *app) collectorRow(c *ui.Context, p collector) {
 				}
 				ui.Text(c, status).FontSize(11).TextColor(color)
 			}
-			ui.Switch(c, &s.Enabled).Label("启用")
+			ui.Switch(c, &d.Enabled).Label("启用")
 		})
 		ui.Divider(c)
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "执行日期").FontSize(11).TextColor(t.TextMuted).Width(76)
-			scheduleDays(c, p.Name()+"执行日期", &s.Days, &s.Custom)
+			scheduleDays(c, p.Name()+"执行日期", &d.Days, &d.Custom)
 		})
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "执行时间").FontSize(11).TextColor(t.TextMuted).Width(76)
-			scheduleTimes(c, &s.Time, &s.Times)
+			scheduleTimes(c, &d.Time, &d.Times)
 			ui.Spacer(c)
 			if ui.PrimaryButton(c, "立即触发").Disabled(!a.canStartCollector()).Clicked() {
 				a.runCollectorNow(p.ID())
 			}
 		})
 		p.View(c, collectorView{Manifest: a.chat.manifest})
+		a.pluginDrafts[p.ID()] = d
+		dirty := a.pluginDraftDirty(p)
+		ui.Row(c).Children(func() {
+			ui.Spacer(c)
+			glassPill(c, iconCheck, "保存", t.Accent, dirty, func() { a.savePluginDraft(p) })
+		})
 	})
 }
 

@@ -76,13 +76,21 @@ type app struct {
 	calendarChanged map[string]bool
 	calYear         int
 
-	settingsDraft   config
-	settingsErr     string
-	keyDraft        string
-	catchUpDraft    string
-	collectStarted  time.Time
+	settingsDraft  config
+	settingsErr    string
+	keyDraft       string
+	catchUpDraft   string
+	collectStarted time.Time
+
+	// The task page edits drafts; nothing is applied until its card's save.
+	autoDraftOn     bool
+	autoDraftDays   []int
+	autoDraftCustom bool
+	autoDraftTime   string
+	autoDraftTimes  []string
+	autoDraftReady  bool
+	pluginDrafts    map[string]collectorSchedule
 	keySaved        bool
-	keySaveTimer    *time.Timer
 	modelPickerOpen bool
 	modelQuery      string
 	models          []modelInfo
@@ -114,10 +122,11 @@ type app struct {
 
 	// The menu bar icon, whether the app starts at login, and the flags
 	// that tell a quit from a window the user closed.
-	tray      *mygo.Tray
-	autoStart bool
-	quitting  bool
-	stopped   chan struct{}
+	tray           *mygo.Tray
+	autoStart      bool
+	autoStartDraft bool
+	quitting       bool
+	stopped        chan struct{}
 }
 
 // pageID names a destination in the sidebar.
