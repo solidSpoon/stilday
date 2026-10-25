@@ -1,6 +1,14 @@
+<p align="center">
+  <img src="resources/icon.png" width="128" height="128" alt="Stilday">
+</p>
+
 # Stilday
 
 主人的一天，写成 JSONL。
+
+蜗牛的家是自己长出来的，不是找来的。
+Stilday 里装的，也是你自己过出来的日子，不是编的。
+一个 macOS App，把一天收下来，Go + MyGo。
 
 侧栏是「事件」+「采集器」+ 一份倒序的日历 + 设置：
 
